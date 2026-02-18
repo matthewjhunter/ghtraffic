@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+echo "Running pre-push checks..."
+
+echo "-> go test -race ./..."
+go test -race ./...
+
+echo "-> go vet ./..."
+go vet ./...
+
+echo "-> golangci-lint run ./..."
+golangci-lint run ./...
+
+echo "-> govulncheck ./..."
+govulncheck ./...
+
+echo "All checks passed."

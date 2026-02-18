@@ -1,2 +1,10 @@
-/ghtraffic
+ghtraffic
 *.jsonl
+dist/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+.task/
+.omc/
