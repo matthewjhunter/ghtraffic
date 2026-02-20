@@ -7,11 +7,15 @@
 //
 // Usage:
 //
-//	ghtraffic >> traffic.jsonl
-//	ghtraffic -owner matthewjhunter >> traffic.jsonl
+//	ghtraffic -seen traffic.jsonl >> traffic.jsonl
+//	ghtraffic -owner matthewjhunter -seen traffic.jsonl >> traffic.jsonl
+//
+// The -seen flag reads an existing JSONL file and skips any repo+date records
+// already present, preventing duplicates when run more than once per day.
 package main
 
 import (
+	"bufio"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -85,11 +89,17 @@ func main() {
 	log.SetFlags(0)
 
 	owner := flag.String("owner", "", "filter repos to this owner/org (optional)")
+	seenFile := flag.String("seen", "", "existing JSONL file to read for deduplication")
 	flag.Parse()
 
 	token := resolveToken()
 	if token == "" {
 		log.Fatal("no GitHub token: set GITHUB_TOKEN or install gh CLI")
+	}
+
+	seen, err := loadSeen(*seenFile)
+	if err != nil {
+		log.Fatalf("load seen: %v", err)
 	}
 
 	client := &apiClient{token: token, http: &http.Client{Timeout: 30 * time.Second}}
@@ -116,18 +126,25 @@ func main() {
 		days := mergeDays(views, clones)
 		if len(days) == 0 {
 			// Emit one record even with no daily data so we know the repo was checked.
-			rec := Record{
-				CollectedAt: now,
-				Repo:        r,
-				Date:        time.Now().UTC().Format("2006-01-02"),
-				Referrers:   referrers,
-				Paths:       paths,
+			date := time.Now().UTC().Format("2006-01-02")
+			if !seen[r+"|"+date] {
+				rec := Record{
+					CollectedAt: now,
+					Repo:        r,
+					Date:        date,
+					Referrers:   referrers,
+					Paths:       paths,
+				}
+				enc.Encode(rec)
 			}
-			enc.Encode(rec)
 			continue
 		}
 
+		emitted := 0
 		for _, d := range days {
+			if seen[r+"|"+d.date] {
+				continue
+			}
 			rec := Record{
 				CollectedAt: now,
 				Repo:        r,
@@ -138,10 +155,46 @@ func main() {
 				Paths:       paths,
 			}
 			enc.Encode(rec)
+			emitted++
 		}
 
-		log.Printf("collected %s (%d days)", r, len(days))
+		if emitted > 0 {
+			log.Printf("collected %s (%d new days)", r, emitted)
+		}
 	}
+}
+
+// loadSeen reads an existing JSONL file and returns a set of "repo|date" keys
+// already recorded. Returns an empty set if path is empty or the file doesn't exist.
+func loadSeen(path string) (map[string]bool, error) {
+	seen := make(map[string]bool)
+	if path == "" {
+		return seen, nil
+	}
+	f, err := os.Open(path)
+	if os.IsNotExist(err) {
+		return seen, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
+	for scanner.Scan() {
+		var rec struct {
+			Repo string `json:"repo"`
+			Date string `json:"date"`
+		}
+		if err := json.Unmarshal(scanner.Bytes(), &rec); err != nil {
+			continue // skip malformed lines
+		}
+		if rec.Repo != "" && rec.Date != "" {
+			seen[rec.Repo+"|"+rec.Date] = true
+		}
+	}
+	return seen, scanner.Err()
 }
 
 func resolveToken() string {
