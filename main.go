@@ -166,6 +166,10 @@ func main() {
 
 // loadSeen reads an existing JSONL file and returns a set of "repo|date" keys
 // already recorded. Returns an empty set if path is empty or the file doesn't exist.
+//
+// Today's date is always excluded from the seen set so that each run re-fetches
+// and re-records the current day's counts. This allows ghtraffic to run hourly
+// and capture intraday traffic growth; ghpush then emits only the delta.
 func loadSeen(path string) (map[string]bool, error) {
 	seen := make(map[string]bool)
 	if path == "" {
@@ -180,6 +184,7 @@ func loadSeen(path string) (map[string]bool, error) {
 	}
 	defer f.Close()
 
+	today := time.Now().UTC().Format("2006-01-02")
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
 	for scanner.Scan() {
@@ -190,7 +195,7 @@ func loadSeen(path string) (map[string]bool, error) {
 		if err := json.Unmarshal(scanner.Bytes(), &rec); err != nil {
 			continue // skip malformed lines
 		}
-		if rec.Repo != "" && rec.Date != "" {
+		if rec.Repo != "" && rec.Date != "" && rec.Date != today {
 			seen[rec.Repo+"|"+rec.Date] = true
 		}
 	}
