@@ -4,8 +4,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -315,37 +313,32 @@ func TestPathEvents_URLIsPath(t *testing.T) {
 
 // --- loadState / saveState ---
 
-func TestLoadState_NonExistentFile(t *testing.T) {
-	st, err := loadState(filepath.Join(t.TempDir(), "state.json"))
+func TestLoadState_NilDB(t *testing.T) {
+	st, err := loadState(nil)
 	if err != nil {
-		t.Fatalf("loadState: %v", err)
+		t.Fatalf("loadState(nil): %v", err)
 	}
 	if len(st.Traffic) != 0 || len(st.Referrers) != 0 || len(st.Paths) != 0 {
-		t.Errorf("expected empty state for missing file, got %+v", st)
-	}
-}
-
-func TestLoadState_EmptyPath(t *testing.T) {
-	st, err := loadState("")
-	if err != nil {
-		t.Fatalf("loadState empty path: %v", err)
-	}
-	if len(st.Traffic) != 0 {
-		t.Error("expected empty state for empty path")
+		t.Errorf("expected empty state for nil db, got %+v", st)
 	}
 }
 
 func TestSaveAndLoadState(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "state.json")
+	db, err := openDB(":memory:")
+	if err != nil {
+		t.Fatalf("openDB: %v", err)
+	}
+	defer db.Close()
+
 	original := newPushState()
 	original.Traffic["owner/repo|2026-02-21"] = trafficCounts{Views: 42, Clones: 8}
 	original.Referrers["owner/repo|2026-02-21"] = true
 	original.Paths["owner/repo|2026-02-21"] = true
 
-	if err := saveState(path, original); err != nil {
+	if err := saveState(db, original); err != nil {
 		t.Fatalf("saveState: %v", err)
 	}
-	loaded, err := loadState(path)
+	loaded, err := loadState(db)
 	if err != nil {
 		t.Fatalf("loadState: %v", err)
 	}
@@ -362,18 +355,52 @@ func TestSaveAndLoadState(t *testing.T) {
 	}
 }
 
-func TestLoadState_MalformedFile(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "state.json")
-	if err := os.WriteFile(path, []byte("not json"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	st, err := loadState(path)
+func TestSaveState_TrafficUpsert(t *testing.T) {
+	db, err := openDB(":memory:")
 	if err != nil {
-		t.Fatalf("loadState malformed: %v", err)
+		t.Fatalf("openDB: %v", err)
 	}
-	// Should return empty state rather than failing.
-	if st.Traffic == nil {
-		t.Error("Traffic map should be non-nil after malformed load")
+	defer db.Close()
+
+	st1 := newPushState()
+	st1.Traffic["a/b|2026-02-21"] = trafficCounts{Views: 10, Clones: 2}
+	if err := saveState(db, st1); err != nil {
+		t.Fatalf("saveState 1: %v", err)
+	}
+
+	st2 := newPushState()
+	st2.Traffic["a/b|2026-02-21"] = trafficCounts{Views: 15, Clones: 5}
+	if err := saveState(db, st2); err != nil {
+		t.Fatalf("saveState 2: %v", err)
+	}
+
+	loaded, err := loadState(db)
+	if err != nil {
+		t.Fatalf("loadState: %v", err)
+	}
+	tc := loaded.Traffic["a/b|2026-02-21"]
+	if tc.Views != 15 || tc.Clones != 5 {
+		t.Errorf("after upsert traffic = %+v, want {Views:15 Clones:5}", tc)
+	}
+}
+
+func TestSaveState_SnapshotIdempotent(t *testing.T) {
+	db, err := openDB(":memory:")
+	if err != nil {
+		t.Fatalf("openDB: %v", err)
+	}
+	defer db.Close()
+
+	st := newPushState()
+	st.Referrers["a/b|2026-02-21"] = true
+	st.Paths["a/b|2026-02-21"] = true
+
+	// Saving twice must not fail (INSERT OR IGNORE semantics).
+	if err := saveState(db, st); err != nil {
+		t.Fatalf("saveState 1: %v", err)
+	}
+	if err := saveState(db, st); err != nil {
+		t.Fatalf("saveState 2 (duplicate): %v", err)
 	}
 }
 

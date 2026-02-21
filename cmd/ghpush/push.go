@@ -2,12 +2,15 @@ package main
 
 import (
 	"bytes"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
-	"os"
+	"strings"
 	"time"
+
+	_ "modernc.org/sqlite"
 )
 
 const userAgent = "ghpush/1.0 (+https://github.com/matthewjhunter/ghtraffic)"
@@ -59,20 +62,19 @@ type eventPayload struct {
 	Data      map[string]any `json:"data,omitempty"`
 }
 
-// pushState tracks what has already been sent to Umami.
+// pushState is the in-memory representation of what has already been pushed.
+// It is loaded from and saved to a SQLite database.
 type pushState struct {
-	// Traffic maps "repo|date" to the cumulative counts already pushed.
-	// Deltas are computed against these values on each run.
-	Traffic map[string]trafficCounts `json:"traffic"`
+	// Traffic maps "repo|date" to cumulative counts already pushed.
+	Traffic map[string]trafficCounts
 	// Referrers and Paths map "repo|collected-date" to a sent flag.
-	// Snapshots are sent once per collection date.
-	Referrers map[string]bool `json:"referrers"`
-	Paths     map[string]bool `json:"paths"`
+	Referrers map[string]bool
+	Paths     map[string]bool
 }
 
 type trafficCounts struct {
-	Views  int `json:"views"`
-	Clones int `json:"clones"`
+	Views  int
+	Clones int
 }
 
 func newPushState() pushState {
@@ -83,19 +85,154 @@ func newPushState() pushState {
 	}
 }
 
+// openDB opens (or creates) the SQLite state database at path and initialises
+// the schema. Pass ":memory:" for an ephemeral in-process database (useful
+// in tests).
+func openDB(path string) (*sql.DB, error) {
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		return nil, fmt.Errorf("open: %w", err)
+	}
+	if _, err := db.Exec(`PRAGMA journal_mode=WAL`); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("WAL pragma: %w", err)
+	}
+	_, err = db.Exec(`
+		CREATE TABLE IF NOT EXISTS traffic (
+			repo   TEXT NOT NULL,
+			date   TEXT NOT NULL,
+			views  INTEGER NOT NULL DEFAULT 0,
+			clones INTEGER NOT NULL DEFAULT 0,
+			PRIMARY KEY (repo, date)
+		);
+		CREATE TABLE IF NOT EXISTS snapshots (
+			repo           TEXT NOT NULL,
+			kind           TEXT NOT NULL,
+			collected_date TEXT NOT NULL,
+			PRIMARY KEY (repo, kind, collected_date)
+		);
+	`)
+	if err != nil {
+		db.Close()
+		return nil, fmt.Errorf("create tables: %w", err)
+	}
+	return db, nil
+}
+
+// loadState reads the full push state from the database into memory.
+// A nil db returns an empty state without error.
+func loadState(db *sql.DB) (pushState, error) {
+	st := newPushState()
+	if db == nil {
+		return st, nil
+	}
+
+	rows, err := db.Query(`SELECT repo, date, views, clones FROM traffic`)
+	if err != nil {
+		return st, fmt.Errorf("query traffic: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var repo, date string
+		var views, clones int
+		if err := rows.Scan(&repo, &date, &views, &clones); err != nil {
+			return st, err
+		}
+		st.Traffic[repo+"|"+date] = trafficCounts{Views: views, Clones: clones}
+	}
+	if err := rows.Err(); err != nil {
+		return st, err
+	}
+
+	rows2, err := db.Query(`SELECT repo, kind, collected_date FROM snapshots`)
+	if err != nil {
+		return st, fmt.Errorf("query snapshots: %w", err)
+	}
+	defer rows2.Close()
+	for rows2.Next() {
+		var repo, kind, date string
+		if err := rows2.Scan(&repo, &kind, &date); err != nil {
+			return st, err
+		}
+		key := repo + "|" + date
+		switch kind {
+		case "referrer":
+			st.Referrers[key] = true
+		case "path":
+			st.Paths[key] = true
+		}
+	}
+	return st, rows2.Err()
+}
+
+// saveState writes the push state to the database using upsert for traffic
+// counts and insert-or-ignore for snapshot flags. A nil db is a no-op.
+func saveState(db *sql.DB, st pushState) error {
+	if db == nil {
+		return nil
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	for key, tc := range st.Traffic {
+		repo, date, ok := splitKey(key)
+		if !ok {
+			continue
+		}
+		_, err := tx.Exec(`
+			INSERT INTO traffic (repo, date, views, clones) VALUES (?, ?, ?, ?)
+			ON CONFLICT (repo, date) DO UPDATE SET
+				views  = excluded.views,
+				clones = excluded.clones
+		`, repo, date, tc.Views, tc.Clones)
+		if err != nil {
+			return fmt.Errorf("upsert traffic %s: %w", key, err)
+		}
+	}
+
+	for key := range st.Referrers {
+		repo, date, ok := splitKey(key)
+		if !ok {
+			continue
+		}
+		if _, err := tx.Exec(
+			`INSERT OR IGNORE INTO snapshots (repo, kind, collected_date) VALUES (?, 'referrer', ?)`,
+			repo, date,
+		); err != nil {
+			return fmt.Errorf("insert referrer snapshot %s: %w", key, err)
+		}
+	}
+
+	for key := range st.Paths {
+		repo, date, ok := splitKey(key)
+		if !ok {
+			continue
+		}
+		if _, err := tx.Exec(
+			`INSERT OR IGNORE INTO snapshots (repo, kind, collected_date) VALUES (?, 'path', ?)`,
+			repo, date,
+		); err != nil {
+			return fmt.Errorf("insert path snapshot %s: %w", key, err)
+		}
+	}
+
+	return tx.Commit()
+}
+
+// splitKey splits a "repo|date" key. repo is "owner/repo" (never contains "|").
+func splitKey(key string) (repo, date string, ok bool) {
+	return strings.Cut(key, "|")
+}
+
 // buildEvents converts ghtraffic records into Umami events, emitting only the
 // delta since the last push for each repo+date. Returns the events to send and
 // an updated state to persist after a successful send.
-//
-// Traffic events are timestamped to UTC midnight for historical dates so they
-// land on the correct day in Umami. For today's date they are timestamped to
-// CollectedAt, giving hourly granularity when ghtraffic runs every hour.
-//
-// Referrer and path snapshots are emitted once per repo per collection date.
 func buildEvents(records []Record, websiteID string, st pushState, now time.Time) ([]umamiEvent, pushState) {
 	today := now.UTC().Format("2006-01-02")
 
-	// Deep-copy state so the input is not mutated.
 	next := newPushState()
 	for k, v := range st.Traffic {
 		next.Traffic[k] = v
@@ -107,7 +244,6 @@ func buildEvents(records []Record, websiteID string, st pushState, now time.Time
 		next.Paths[k] = v
 	}
 
-	// Most-recent record per repo for referrer/path snapshot events.
 	latestByRepo := make(map[string]Record)
 	for _, r := range records {
 		if prev, ok := latestByRepo[r.Repo]; !ok || r.Date > prev.Date {
@@ -117,7 +253,6 @@ func buildEvents(records []Record, websiteID string, st pushState, now time.Time
 
 	var events []umamiEvent
 
-	// Traffic events — one event per new hit since last push.
 	for _, r := range records {
 		key := r.Repo + "|" + r.Date
 		prev := next.Traffic[key]
@@ -154,7 +289,6 @@ func buildEvents(records []Record, websiteID string, st pushState, now time.Time
 		}
 	}
 
-	// Referrer and path snapshot events — once per repo per collection date.
 	for repo, r := range latestByRepo {
 		collectedAt, err := time.Parse(time.RFC3339, r.CollectedAt)
 		if err != nil {
@@ -179,8 +313,7 @@ func buildEvents(records []Record, websiteID string, st pushState, now time.Time
 }
 
 // dayTimestamp returns the Umami event timestamp for a record.
-// Historical dates use UTC midnight so events land on the correct date.
-// Today's date uses CollectedAt to provide hourly granularity.
+// Historical dates use UTC midnight; today's date uses CollectedAt.
 func dayTimestamp(date, collectedAt, today string) int64 {
 	if date == today {
 		if t, err := time.Parse(time.RFC3339, collectedAt); err == nil {
@@ -191,8 +324,7 @@ func dayTimestamp(date, collectedAt, today string) int64 {
 	return t.UTC().Unix()
 }
 
-// referrerEvents builds one github_referrer event per referral hit from a
-// repo's rolling referrer snapshot.
+// referrerEvents builds one github_referrer event per referral hit.
 func referrerEvents(repo string, refs []Referrer, collectedAt time.Time, websiteID string) []umamiEvent {
 	ts := collectedAt.UTC().Unix()
 	var out []umamiEvent
@@ -207,9 +339,8 @@ func referrerEvents(repo string, refs []Referrer, collectedAt time.Time, website
 	return out
 }
 
-// pathEvents builds one github_path event per hit from a repo's popular-paths
-// snapshot. The path string is used as the Umami URL so path-level breakdowns
-// work naturally in the Umami UI.
+// pathEvents builds one github_path event per path hit.
+// The path string is used as the Umami URL for natural path-level breakdowns.
 func pathEvents(repo string, paths []Path, collectedAt time.Time, websiteID string) []umamiEvent {
 	ts := collectedAt.UTC().Unix()
 	var out []umamiEvent
@@ -276,50 +407,4 @@ func (p *pusher) sendBatch(events []umamiEvent) error {
 		return fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
 	return nil
-}
-
-// loadState reads the push state from a JSON file. Returns an empty state if
-// path is empty, the file does not exist, or the file cannot be parsed.
-func loadState(path string) (pushState, error) {
-	if path == "" {
-		return newPushState(), nil
-	}
-	f, err := os.Open(path)
-	if os.IsNotExist(err) {
-		return newPushState(), nil
-	}
-	if err != nil {
-		return newPushState(), err
-	}
-	defer f.Close()
-
-	var st pushState
-	if err := json.NewDecoder(f).Decode(&st); err != nil {
-		// Treat a malformed file as empty rather than failing hard.
-		return newPushState(), nil
-	}
-	// Ensure maps are non-nil after decode.
-	if st.Traffic == nil {
-		st.Traffic = make(map[string]trafficCounts)
-	}
-	if st.Referrers == nil {
-		st.Referrers = make(map[string]bool)
-	}
-	if st.Paths == nil {
-		st.Paths = make(map[string]bool)
-	}
-	return st, nil
-}
-
-// saveState writes the push state to a JSON file.
-func saveState(path string, st pushState) error {
-	f, err := os.Create(path)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-
-	enc := json.NewEncoder(f)
-	enc.SetIndent("", "  ")
-	return enc.Encode(st)
 }

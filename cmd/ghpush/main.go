@@ -6,7 +6,7 @@
 // Usage:
 //
 //	ghtraffic -seen traffic.jsonl >> traffic.jsonl
-//	ghpush -pushed pushed.json < traffic.jsonl
+//	ghpush -pushed pushed.db < traffic.jsonl
 //
 // Environment variables:
 //
@@ -16,6 +16,7 @@ package main
 
 import (
 	"bufio"
+	"database/sql"
 	"encoding/json"
 	"flag"
 	"log"
@@ -30,7 +31,7 @@ func main() {
 
 	umamiURL := flag.String("url", envOrDefault("UMAMI_URL", ""), "Umami base URL (e.g. https://umami.example.com)")
 	websiteID := flag.String("website", envOrDefault("UMAMI_WEBSITE_ID", ""), "Umami website UUID")
-	pushedFile := flag.String("pushed", "", "JSON state file tracking pushed counts (prevents re-pushing on re-run)")
+	pushedFile := flag.String("pushed", "", "SQLite state file tracking pushed counts (prevents re-pushing on re-run)")
 	batchSize := flag.Int("batch-size", 100, "events per POST to Umami /api/batch")
 	dryRun := flag.Bool("dry-run", false, "print events as JSON to stdout without sending")
 	flag.Parse()
@@ -44,7 +45,17 @@ func main() {
 		}
 	}
 
-	st, err := loadState(*pushedFile)
+	var db *sql.DB
+	if *pushedFile != "" {
+		var err error
+		db, err = openDB(*pushedFile)
+		if err != nil {
+			log.Fatalf("open state db: %v", err)
+		}
+		defer db.Close()
+	}
+
+	st, err := loadState(db)
 	if err != nil {
 		log.Fatalf("load state: %v", err)
 	}
@@ -94,11 +105,9 @@ func main() {
 		log.Fatalf("push: %v", err)
 	}
 
-	if *pushedFile != "" {
-		if err := saveState(*pushedFile, newSt); err != nil {
-			// Non-fatal: push succeeded; warn so the user can investigate.
-			log.Printf("warning: could not save state, next run may re-push: %v", err)
-		}
+	if err := saveState(db, newSt); err != nil {
+		// Non-fatal: push succeeded; warn so the user can investigate.
+		log.Printf("warning: could not save state, next run may re-push: %v", err)
 	}
 
 	log.Print("done")
