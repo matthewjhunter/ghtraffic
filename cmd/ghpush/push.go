@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"bytes"
 	"encoding/json"
 	"fmt"
@@ -60,21 +59,55 @@ type eventPayload struct {
 	Data      map[string]any `json:"data,omitempty"`
 }
 
-// buildEvents converts ghtraffic records into Umami events, skipping any
-// repo+date combination already present in pushed. Returns the events to send
-// and the set of new state keys generated (to be merged into pushed after a
-// successful send).
-//
-// Each view, clone, referral, and path hit is emitted as an individual event
-// so Umami's native event-count charts reflect actual traffic numbers without
-// any custom querying.
-func buildEvents(records []Record, websiteID string, pushed map[string]bool) ([]umamiEvent, map[string]bool) {
-	newKeys := make(map[string]bool)
-	var events []umamiEvent
+// pushState tracks what has already been sent to Umami.
+type pushState struct {
+	// Traffic maps "repo|date" to the cumulative counts already pushed.
+	// Deltas are computed against these values on each run.
+	Traffic map[string]trafficCounts `json:"traffic"`
+	// Referrers and Paths map "repo|collected-date" to a sent flag.
+	// Snapshots are sent once per collection date.
+	Referrers map[string]bool `json:"referrers"`
+	Paths     map[string]bool `json:"paths"`
+}
 
-	// Determine the most-recent record per repo for referrer/path events.
-	// Referrers and paths from GitHub are rolling 14-day snapshots, not
-	// time-series, so we emit them once from the latest record only.
+type trafficCounts struct {
+	Views  int `json:"views"`
+	Clones int `json:"clones"`
+}
+
+func newPushState() pushState {
+	return pushState{
+		Traffic:   make(map[string]trafficCounts),
+		Referrers: make(map[string]bool),
+		Paths:     make(map[string]bool),
+	}
+}
+
+// buildEvents converts ghtraffic records into Umami events, emitting only the
+// delta since the last push for each repo+date. Returns the events to send and
+// an updated state to persist after a successful send.
+//
+// Traffic events are timestamped to UTC midnight for historical dates so they
+// land on the correct day in Umami. For today's date they are timestamped to
+// CollectedAt, giving hourly granularity when ghtraffic runs every hour.
+//
+// Referrer and path snapshots are emitted once per repo per collection date.
+func buildEvents(records []Record, websiteID string, st pushState, now time.Time) ([]umamiEvent, pushState) {
+	today := now.UTC().Format("2006-01-02")
+
+	// Deep-copy state so the input is not mutated.
+	next := newPushState()
+	for k, v := range st.Traffic {
+		next.Traffic[k] = v
+	}
+	for k, v := range st.Referrers {
+		next.Referrers[k] = v
+	}
+	for k, v := range st.Paths {
+		next.Paths[k] = v
+	}
+
+	// Most-recent record per repo for referrer/path snapshot events.
 	latestByRepo := make(map[string]Record)
 	for _, r := range records {
 		if prev, ok := latestByRepo[r.Repo]; !ok || r.Date > prev.Date {
@@ -82,67 +115,80 @@ func buildEvents(records []Record, websiteID string, pushed map[string]bool) ([]
 		}
 	}
 
-	// github_view and github_clone — one event per hit, per day.
+	var events []umamiEvent
+
+	// Traffic events — one event per new hit since last push.
 	for _, r := range records {
-		key := "t|" + r.Repo + "|" + r.Date
-		if pushed[key] {
+		key := r.Repo + "|" + r.Date
+		prev := next.Traffic[key]
+
+		viewDelta := r.Views.Count - prev.Views
+		cloneDelta := r.Clones.Count - prev.Clones
+		if viewDelta <= 0 && cloneDelta <= 0 {
 			continue
 		}
-		vs, cs, err := trafficEvents(r, websiteID)
-		if err != nil {
-			continue // malformed date; skip
+
+		ts := dayTimestamp(r.Date, r.CollectedAt, today)
+		data := map[string]any{"repo": r.Repo}
+
+		if viewDelta > 0 {
+			e := umamiEvent{Type: "event", Payload: eventPayload{
+				Website: websiteID, Hostname: "github.com",
+				URL: "/" + r.Repo, Name: "github_view",
+				Timestamp: ts, Data: data,
+			}}
+			events = append(events, repeatEvent(e, viewDelta)...)
 		}
-		events = append(events, vs...)
-		events = append(events, cs...)
-		newKeys[key] = true
+		if cloneDelta > 0 {
+			e := umamiEvent{Type: "event", Payload: eventPayload{
+				Website: websiteID, Hostname: "github.com",
+				URL: "/" + r.Repo, Name: "github_clone",
+				Timestamp: ts, Data: data,
+			}}
+			events = append(events, repeatEvent(e, cloneDelta)...)
+		}
+
+		next.Traffic[key] = trafficCounts{
+			Views:  max(r.Views.Count, prev.Views),
+			Clones: max(r.Clones.Count, prev.Clones),
+		}
 	}
 
-	// github_referrer and github_path events — once per repo.
+	// Referrer and path snapshot events — once per repo per collection date.
 	for repo, r := range latestByRepo {
 		collectedAt, err := time.Parse(time.RFC3339, r.CollectedAt)
 		if err != nil {
-			collectedAt = time.Now().UTC()
+			collectedAt = now
 		}
 		collectedDate := collectedAt.UTC().Format("2006-01-02")
 
-		refKey := "r|" + repo + "|" + collectedDate
-		if !pushed[refKey] && len(r.Referrers) > 0 {
+		refKey := repo + "|" + collectedDate
+		if !next.Referrers[refKey] && len(r.Referrers) > 0 {
 			events = append(events, referrerEvents(repo, r.Referrers, collectedAt, websiteID)...)
-			newKeys[refKey] = true
+			next.Referrers[refKey] = true
 		}
 
-		pathKey := "p|" + repo + "|" + collectedDate
-		if !pushed[pathKey] && len(r.Paths) > 0 {
+		pathKey := repo + "|" + collectedDate
+		if !next.Paths[pathKey] && len(r.Paths) > 0 {
 			events = append(events, pathEvents(repo, r.Paths, collectedAt, websiteID)...)
-			newKeys[pathKey] = true
+			next.Paths[pathKey] = true
 		}
 	}
 
-	return events, newKeys
+	return events, next
 }
 
-// trafficEvents returns one github_view event per view hit and one github_clone
-// event per clone hit for the given record. Umami's event count charts will
-// then display actual traffic numbers natively.
-func trafficEvents(r Record, websiteID string) (views, clones []umamiEvent, err error) {
-	t, err := time.Parse("2006-01-02", r.Date)
-	if err != nil {
-		return nil, nil, fmt.Errorf("parse date %q: %w", r.Date, err)
+// dayTimestamp returns the Umami event timestamp for a record.
+// Historical dates use UTC midnight so events land on the correct date.
+// Today's date uses CollectedAt to provide hourly granularity.
+func dayTimestamp(date, collectedAt, today string) int64 {
+	if date == today {
+		if t, err := time.Parse(time.RFC3339, collectedAt); err == nil {
+			return t.UTC().Unix()
+		}
 	}
-	ts := t.UTC().Unix()
-	data := map[string]any{"repo": r.Repo}
-
-	view := umamiEvent{Type: "event", Payload: eventPayload{
-		Website: websiteID, Hostname: "github.com",
-		URL: "/" + r.Repo, Name: "github_view",
-		Timestamp: ts, Data: data,
-	}}
-	clone := umamiEvent{Type: "event", Payload: eventPayload{
-		Website: websiteID, Hostname: "github.com",
-		URL: "/" + r.Repo, Name: "github_clone",
-		Timestamp: ts, Data: data,
-	}}
-	return repeatEvent(view, r.Views.Count), repeatEvent(clone, r.Clones.Count), nil
+	t, _ := time.Parse("2006-01-02", date)
+	return t.UTC().Unix()
 }
 
 // referrerEvents builds one github_referrer event per referral hit from a
@@ -232,44 +278,48 @@ func (p *pusher) sendBatch(events []umamiEvent) error {
 	return nil
 }
 
-// loadPushed reads the pushed-state file and returns the set of already-pushed
-// keys. Returns an empty set if path is empty or the file does not exist.
-func loadPushed(path string) (map[string]bool, error) {
-	pushed := make(map[string]bool)
+// loadState reads the push state from a JSON file. Returns an empty state if
+// path is empty, the file does not exist, or the file cannot be parsed.
+func loadState(path string) (pushState, error) {
 	if path == "" {
-		return pushed, nil
+		return newPushState(), nil
 	}
 	f, err := os.Open(path)
 	if os.IsNotExist(err) {
-		return pushed, nil
+		return newPushState(), nil
 	}
 	if err != nil {
-		return nil, err
+		return newPushState(), err
 	}
 	defer f.Close()
 
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		if k := scanner.Text(); k != "" {
-			pushed[k] = true
-		}
+	var st pushState
+	if err := json.NewDecoder(f).Decode(&st); err != nil {
+		// Treat a malformed file as empty rather than failing hard.
+		return newPushState(), nil
 	}
-	return pushed, scanner.Err()
+	// Ensure maps are non-nil after decode.
+	if st.Traffic == nil {
+		st.Traffic = make(map[string]trafficCounts)
+	}
+	if st.Referrers == nil {
+		st.Referrers = make(map[string]bool)
+	}
+	if st.Paths == nil {
+		st.Paths = make(map[string]bool)
+	}
+	return st, nil
 }
 
-// savePushed writes the full pushed-state map as one key per line.
-func savePushed(path string, pushed map[string]bool) error {
+// saveState writes the push state to a JSON file.
+func saveState(path string, st pushState) error {
 	f, err := os.Create(path)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
 
-	w := bufio.NewWriter(f)
-	for k := range pushed {
-		if _, err := fmt.Fprintln(w, k); err != nil {
-			return err
-		}
-	}
-	return w.Flush()
+	enc := json.NewEncoder(f)
+	enc.SetIndent("", "  ")
+	return enc.Encode(st)
 }

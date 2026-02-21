@@ -6,7 +6,7 @@
 // Usage:
 //
 //	ghtraffic -seen traffic.jsonl >> traffic.jsonl
-//	ghpush -pushed pushed.txt < traffic.jsonl
+//	ghpush -pushed pushed.json < traffic.jsonl
 //
 // Environment variables:
 //
@@ -30,7 +30,7 @@ func main() {
 
 	umamiURL := flag.String("url", envOrDefault("UMAMI_URL", ""), "Umami base URL (e.g. https://umami.example.com)")
 	websiteID := flag.String("website", envOrDefault("UMAMI_WEBSITE_ID", ""), "Umami website UUID")
-	pushedFile := flag.String("pushed", "", "state file tracking already-pushed records (prevents duplicates on re-run)")
+	pushedFile := flag.String("pushed", "", "JSON state file tracking pushed counts (prevents re-pushing on re-run)")
 	batchSize := flag.Int("batch-size", 100, "events per POST to Umami /api/batch")
 	dryRun := flag.Bool("dry-run", false, "print events as JSON to stdout without sending")
 	flag.Parse()
@@ -44,9 +44,9 @@ func main() {
 		}
 	}
 
-	pushed, err := loadPushed(*pushedFile)
+	st, err := loadState(*pushedFile)
 	if err != nil {
-		log.Fatalf("load pushed state: %v", err)
+		log.Fatalf("load state: %v", err)
 	}
 
 	var records []Record
@@ -67,7 +67,7 @@ func main() {
 		log.Fatalf("read stdin: %v", err)
 	}
 
-	events, newKeys := buildEvents(records, *websiteID, pushed)
+	events, newSt := buildEvents(records, *websiteID, st, time.Now())
 	if len(events) == 0 {
 		log.Print("no new events to push")
 		return
@@ -95,12 +95,9 @@ func main() {
 	}
 
 	if *pushedFile != "" {
-		for k := range newKeys {
-			pushed[k] = true
-		}
-		if err := savePushed(*pushedFile, pushed); err != nil {
+		if err := saveState(*pushedFile, newSt); err != nil {
 			// Non-fatal: push succeeded; warn so the user can investigate.
-			log.Printf("warning: could not save pushed state, next run may re-push: %v", err)
+			log.Printf("warning: could not save state, next run may re-push: %v", err)
 		}
 	}
 
