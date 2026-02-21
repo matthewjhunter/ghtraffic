@@ -38,6 +38,7 @@ func main() {
 	batchSize := flag.Int("batch-size", 100, "events per POST to Umami /api/batch")
 	dryRun := flag.Bool("dry-run", false, "print events as JSON to stdout without sending")
 	init_ := flag.Bool("init", false, "bootstrap from scratch: ignore push state and push all historical data")
+	importJSON := flag.String("import-json", "", "import a legacy JSON state file into the SQLite DB and exit")
 	flag.Parse()
 
 	if !*dryRun {
@@ -57,6 +58,18 @@ func main() {
 			log.Fatalf("open state db: %v", err)
 		}
 		defer db.Close()
+	}
+
+	// -import-json: migrate legacy JSON state into the SQLite DB and exit.
+	if *importJSON != "" {
+		if db == nil {
+			log.Fatal("-import-json requires -pushed to specify the SQLite database")
+		}
+		if err := importJSONState(*importJSON, db); err != nil {
+			log.Fatalf("import: %v", err)
+		}
+		log.Print("import complete")
+		return
 	}
 
 	// -init: treat all records as new regardless of stored state.

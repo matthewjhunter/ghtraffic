@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -435,6 +436,55 @@ func TestResetState_ClearsAllTables(t *testing.T) {
 func TestResetState_NilDB(t *testing.T) {
 	if err := resetState(nil); err != nil {
 		t.Errorf("resetState(nil) should be a no-op, got: %v", err)
+	}
+}
+
+// --- importJSONState ---
+
+func TestImportJSONState_RoundTrip(t *testing.T) {
+	// Write a legacy JSON state file.
+	path := t.TempDir() + "/state.json"
+	if err := os.WriteFile(path, []byte(`{
+		"traffic":   {"owner/repo|2026-02-15": {"views": 42, "clones": 8}},
+		"referrers": {"owner/repo|2026-02-15": true},
+		"paths":     {"owner/repo|2026-02-15": true}
+	}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err := openDB(":memory:")
+	if err != nil {
+		t.Fatalf("openDB: %v", err)
+	}
+	defer db.Close()
+
+	if err := importJSONState(path, db); err != nil {
+		t.Fatalf("importJSONState: %v", err)
+	}
+
+	loaded, err := loadState(db)
+	if err != nil {
+		t.Fatalf("loadState: %v", err)
+	}
+	tc := loaded.Traffic["owner/repo|2026-02-15"]
+	if tc.Views != 42 || tc.Clones != 8 {
+		t.Errorf("traffic = %+v, want {Views:42 Clones:8}", tc)
+	}
+	if !loaded.Referrers["owner/repo|2026-02-15"] {
+		t.Error("expected referrer key")
+	}
+	if !loaded.Paths["owner/repo|2026-02-15"] {
+		t.Error("expected path key")
+	}
+}
+
+func TestImportJSONState_NilDB(t *testing.T) {
+	path := t.TempDir() + "/state.json"
+	if err := os.WriteFile(path, []byte(`{"traffic":{},"referrers":{},"paths":{}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := importJSONState(path, nil); err != nil {
+		t.Errorf("importJSONState(nil db) should be a no-op, got: %v", err)
 	}
 }
 

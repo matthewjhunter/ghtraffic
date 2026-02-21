@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -220,6 +221,48 @@ func saveState(db *sql.DB, st pushState) error {
 	}
 
 	return tx.Commit()
+}
+
+// jsonPushState mirrors the legacy JSON state file format used before the
+// SQLite migration. Field names match the original json tags exactly.
+type jsonPushState struct {
+	Traffic   map[string]struct {
+		Views  int `json:"views"`
+		Clones int `json:"clones"`
+	} `json:"traffic"`
+	Referrers map[string]bool `json:"referrers"`
+	Paths     map[string]bool `json:"paths"`
+}
+
+// importJSONState reads a legacy JSON state file and merges its contents into
+// the database. Existing rows are updated via upsert; the import is idempotent.
+// A nil db is a no-op.
+func importJSONState(path string, db *sql.DB) error {
+	if db == nil {
+		return nil
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("open: %w", err)
+	}
+	defer f.Close()
+
+	var js jsonPushState
+	if err := json.NewDecoder(f).Decode(&js); err != nil {
+		return fmt.Errorf("decode: %w", err)
+	}
+
+	st := newPushState()
+	for key, tc := range js.Traffic {
+		st.Traffic[key] = trafficCounts{Views: tc.Views, Clones: tc.Clones}
+	}
+	for key, v := range js.Referrers {
+		st.Referrers[key] = v
+	}
+	for key, v := range js.Paths {
+		st.Paths[key] = v
+	}
+	return saveState(db, st)
 }
 
 // resetState clears all persisted push state from the database. A nil db is a no-op.
