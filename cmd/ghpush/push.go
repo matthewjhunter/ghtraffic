@@ -328,8 +328,8 @@ func buildEvents(records []Record, websiteID string, st pushState, now time.Time
 		ts := dayTimestamp(r.Date, r.CollectedAt, today)
 
 		if viewDelta > 0 {
-			// Views map to pageviews so they appear in the main Umami chart.
-			e := umamiEvent{Type: "pageview", Payload: eventPayload{
+			// No Name → Umami v2 treats this as a pageview (shows in main chart).
+			e := umamiEvent{Type: "event", Payload: eventPayload{
 				Website: websiteID, Hostname: "github.com",
 				URL: "/" + r.Repo, Timestamp: ts,
 			}}
@@ -402,11 +402,12 @@ func referrerEvents(repo string, refs []Referrer, collectedAt time.Time, website
 
 // pathEvents builds one pageview per path hit using the GitHub path as the URL.
 // This populates Umami's top-pages breakdown with the actual repo subpaths.
+// No Name → Umami v2 treats events without a name as pageviews.
 func pathEvents(_ string, paths []Path, collectedAt time.Time, websiteID string) []umamiEvent {
 	ts := collectedAt.UTC().Unix()
 	var out []umamiEvent
 	for _, p := range paths {
-		e := umamiEvent{Type: "pageview", Payload: eventPayload{
+		e := umamiEvent{Type: "event", Payload: eventPayload{
 			Website: websiteID, Hostname: "github.com",
 			URL: p.Path, Timestamp: ts,
 		}}
@@ -461,10 +462,19 @@ func (p *pusher) sendBatch(events []umamiEvent) error {
 		return fmt.Errorf("send: %w", err)
 	}
 	defer resp.Body.Close()
-	io.Copy(io.Discard, resp.Body) //nolint:errcheck
+	respBody, _ := io.ReadAll(resp.Body)
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("HTTP %d", resp.StatusCode)
+		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, respBody)
+	}
+
+	// The batch API returns HTTP 200 even when events fail validation;
+	// check the response body for application-level errors.
+	var result struct {
+		Errors int `json:"errors"`
+	}
+	if err := json.Unmarshal(respBody, &result); err == nil && result.Errors > 0 {
+		return fmt.Errorf("batch rejected %d events: %s", result.Errors, respBody)
 	}
 	return nil
 }
