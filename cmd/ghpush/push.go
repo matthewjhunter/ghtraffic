@@ -58,7 +58,7 @@ type eventPayload struct {
 	Website   string         `json:"website"`
 	Hostname  string         `json:"hostname"`
 	URL       string         `json:"url"`
-	Name      string         `json:"name"`
+	Name      string         `json:"name,omitempty"`
 	Timestamp int64          `json:"timestamp"`
 	Data      map[string]any `json:"data,omitempty"`
 }
@@ -326,13 +326,12 @@ func buildEvents(records []Record, websiteID string, st pushState, now time.Time
 		}
 
 		ts := dayTimestamp(r.Date, r.CollectedAt, today)
-		data := map[string]any{"repo": r.Repo}
 
 		if viewDelta > 0 {
-			e := umamiEvent{Type: "event", Payload: eventPayload{
+			// Views map to pageviews so they appear in the main Umami chart.
+			e := umamiEvent{Type: "pageview", Payload: eventPayload{
 				Website: websiteID, Hostname: "github.com",
-				URL: "/" + r.Repo, Name: "github_view",
-				Timestamp: ts, Data: data,
+				URL: "/" + r.Repo, Timestamp: ts,
 			}}
 			events = append(events, repeatEvent(e, viewDelta)...)
 		}
@@ -340,7 +339,7 @@ func buildEvents(records []Record, websiteID string, st pushState, now time.Time
 			e := umamiEvent{Type: "event", Payload: eventPayload{
 				Website: websiteID, Hostname: "github.com",
 				URL: "/" + r.Repo, Name: "github_clone",
-				Timestamp: ts, Data: data,
+				Timestamp: ts, Data: map[string]any{"repo": r.Repo},
 			}}
 			events = append(events, repeatEvent(e, cloneDelta)...)
 		}
@@ -401,16 +400,15 @@ func referrerEvents(repo string, refs []Referrer, collectedAt time.Time, website
 	return out
 }
 
-// pathEvents builds one github_path event per path hit.
-// The path string is used as the Umami URL for natural path-level breakdowns.
-func pathEvents(repo string, paths []Path, collectedAt time.Time, websiteID string) []umamiEvent {
+// pathEvents builds one pageview per path hit using the GitHub path as the URL.
+// This populates Umami's top-pages breakdown with the actual repo subpaths.
+func pathEvents(_ string, paths []Path, collectedAt time.Time, websiteID string) []umamiEvent {
 	ts := collectedAt.UTC().Unix()
 	var out []umamiEvent
 	for _, p := range paths {
-		e := umamiEvent{Type: "event", Payload: eventPayload{
+		e := umamiEvent{Type: "pageview", Payload: eventPayload{
 			Website: websiteID, Hostname: "github.com",
-			URL: p.Path, Name: "github_path",
-			Timestamp: ts, Data: map[string]any{"repo": repo, "title": p.Title},
+			URL: p.Path, Timestamp: ts,
 		}}
 		out = append(out, repeatEvent(e, p.Count)...)
 	}

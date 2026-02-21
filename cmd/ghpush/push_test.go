@@ -81,10 +81,9 @@ func TestBuildEvents_FirstRun_FullCount(t *testing.T) {
 
 	var views, clones int
 	for _, e := range events {
-		switch e.Payload.Name {
-		case "github_view":
+		if e.Type == "pageview" {
 			views++
-		case "github_clone":
+		} else if e.Payload.Name == "github_clone" {
 			clones++
 		}
 	}
@@ -118,10 +117,9 @@ func TestBuildEvents_Delta(t *testing.T) {
 
 	var views, clones int
 	for _, e := range events {
-		switch e.Payload.Name {
-		case "github_view":
+		if e.Type == "pageview" {
 			views++
-		case "github_clone":
+		} else if e.Payload.Name == "github_clone" {
 			clones++
 		}
 	}
@@ -153,8 +151,8 @@ func TestBuildEvents_NoNewTraffic(t *testing.T) {
 	events, _ := buildEvents(records, "uuid", st, now)
 
 	for _, e := range events {
-		if e.Payload.Name == "github_view" || e.Payload.Name == "github_clone" {
-			t.Errorf("unexpected traffic event %q when counts unchanged", e.Payload.Name)
+		if e.Type == "pageview" || e.Payload.Name == "github_clone" {
+			t.Errorf("unexpected traffic event (type=%q name=%q) when counts unchanged", e.Type, e.Payload.Name)
 		}
 	}
 }
@@ -173,7 +171,7 @@ func TestBuildEvents_TodayUsesCollectedAtTimestamp(t *testing.T) {
 
 	expected, _ := time.Parse(time.RFC3339, "2026-02-21T14:30:00Z")
 	for _, e := range events {
-		if e.Payload.Name == "github_view" && e.Payload.Timestamp != expected.UTC().Unix() {
+		if e.Type == "pageview" && e.Payload.Timestamp != expected.UTC().Unix() {
 			t.Errorf("today timestamp = %d, want %d (CollectedAt)", e.Payload.Timestamp, expected.UTC().Unix())
 		}
 	}
@@ -193,7 +191,7 @@ func TestBuildEvents_HistoricalUsesMidnightTimestamp(t *testing.T) {
 
 	midnight, _ := time.Parse("2006-01-02", "2026-02-15")
 	for _, e := range events {
-		if e.Payload.Name == "github_view" && e.Payload.Timestamp != midnight.UTC().Unix() {
+		if e.Type == "pageview" && e.Payload.Timestamp != midnight.UTC().Unix() {
 			t.Errorf("historical timestamp = %d, want %d (midnight)", e.Payload.Timestamp, midnight.UTC().Unix())
 		}
 	}
