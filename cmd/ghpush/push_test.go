@@ -229,10 +229,10 @@ func TestBuildEvents_ReferrersFromLatestRecord(t *testing.T) {
 
 	var refCount int
 	for _, e := range events {
-		if e.Payload.Name == "github_referrer" {
+		if e.Payload.Referrer != "" {
 			refCount++
-			if v, _ := e.Payload.Data["referrer"].(string); v != "new.com" {
-				t.Errorf("referrer = %q, want new.com", v)
+			if e.Payload.Referrer != "https://new.com" {
+				t.Errorf("Referrer = %q, want https://new.com", e.Payload.Referrer)
 			}
 		}
 	}
@@ -253,7 +253,7 @@ func TestBuildEvents_SkipsPushedReferrers(t *testing.T) {
 	events, _ := buildEvents([]Record{r}, "uuid", st, now)
 
 	for _, e := range events {
-		if e.Payload.Name == "github_referrer" {
+		if e.Payload.Referrer != "" {
 			t.Error("expected no referrer events when already in state")
 		}
 	}
@@ -272,11 +272,11 @@ func TestReferrerEvents_Count(t *testing.T) {
 	if len(events) != 15 {
 		t.Fatalf("len(events) = %d, want 15 (10+5)", len(events))
 	}
-	if v, _ := events[0].Payload.Data["referrer"].(string); v != "google.com" {
-		t.Errorf("events[0] referrer = %q, want google.com", v)
+	if events[0].Payload.Referrer != "https://google.com" {
+		t.Errorf("events[0] Referrer = %q, want https://google.com", events[0].Payload.Referrer)
 	}
-	if v, _ := events[10].Payload.Data["referrer"].(string); v != "github.com" {
-		t.Errorf("events[10] referrer = %q, want github.com", v)
+	if events[10].Payload.Referrer != "https://github.com" {
+		t.Errorf("events[10] Referrer = %q, want https://github.com", events[10].Payload.Referrer)
 	}
 }
 

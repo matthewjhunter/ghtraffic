@@ -396,16 +396,21 @@ func dayTimestamp(date, collectedAt, today string) int64 {
 	return t.UTC().Unix()
 }
 
-// referrerEvents builds one github_referrer event per referral hit.
+// referrerEvents builds one pageview per referral hit with the Referrer
+// payload field set so Umami populates its built-in referrer breakdown.
 func referrerEvents(repo string, refs []Referrer, collectedAt time.Time, websiteID string) []umamiEvent {
 	ts := collectedAt.UTC().Unix()
 	var out []umamiEvent
 	for _, ref := range refs {
+		referrerURL := ref.Name
+		if !strings.Contains(ref.Name, "://") {
+			referrerURL = "https://" + ref.Name
+		}
 		e := umamiEvent{Type: "event", Payload: eventPayload{
 			Website: websiteID, Hostname: "github.com",
 			Screen: "1920x1080", Language: "en-US",
-			URL: "/" + repo, Name: "github_referrer",
-			Timestamp: ts, Data: map[string]any{"repo": repo, "referrer": ref.Name},
+			URL: "/" + repo, Referrer: referrerURL,
+			Timestamp: ts,
 		}}
 		out = append(out, repeatEvent(e, ref.Count)...)
 	}
