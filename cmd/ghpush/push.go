@@ -53,13 +53,9 @@ type Path struct {
 }
 
 // umamiEvent is a single event in Umami's send API format.
-// ip is not serialised; it is sent as X-Forwarded-For so that Cloudflare
-// forwards a deterministic fake IP to Umami, giving each logical source
-// (repo+date, referrer, …) its own unique-visitor count.
 type umamiEvent struct {
 	Type    string       `json:"type"`
 	Payload eventPayload `json:"payload"`
-	ip      string
 }
 
 type eventPayload struct {
@@ -342,7 +338,7 @@ func buildEvents(records []Record, websiteID string, st pushState, now time.Time
 		if viewDelta > 0 {
 			// No Name → Umami v2 treats this as a pageview (shows in main chart).
 			key := r.Repo + "|" + r.Date
-			e := umamiEvent{Type: "event", ip: sessionIP(key), Payload: eventPayload{
+			e := umamiEvent{Type: "event", Payload: eventPayload{
 				Website: websiteID, Hostname: "github.com",
 				Screen: sessionScreen(key), Language: "en-US",
 				URL: "/" + r.Repo, Timestamp: ts,
@@ -353,7 +349,7 @@ func buildEvents(records []Record, websiteID string, st pushState, now time.Time
 			// Clones as pageviews under /clone/ prefix with a distinct session
 			// key so they appear as separate visitors from view traffic.
 			key := "clone/" + r.Repo + "|" + r.Date
-			e := umamiEvent{Type: "event", ip: sessionIP(key), Payload: eventPayload{
+			e := umamiEvent{Type: "event", Payload: eventPayload{
 				Website: websiteID, Hostname: "github.com",
 				Screen: sessionScreen(key), Language: "en-US",
 				URL: "/clone/" + r.Repo, Timestamp: ts,
@@ -410,16 +406,6 @@ func sessionScreen(key string) string {
 	return fmt.Sprintf("1920x%d", 900+h.Sum32()%1000)
 }
 
-// sessionIP returns a deterministic fake IPv4 in 10.x.x.x derived from key.
-// Sent as X-Forwarded-For so Cloudflare forwards it to Umami, which uses it
-// as the visitor IP — giving each logical source its own unique-visitor count.
-func sessionIP(key string) string {
-	h := fnv.New32a()
-	h.Write([]byte("ip:" + key))
-	v := h.Sum32()
-	return fmt.Sprintf("10.%d.%d.%d", (v>>16)&0xff, (v>>8)&0xff, v&0xff)
-}
-
 // referrerEvents builds one pageview per referral hit with the Referrer
 // payload field set so Umami populates its built-in referrer breakdown.
 func referrerEvents(repo string, refs []Referrer, collectedAt time.Time, websiteID string) []umamiEvent {
@@ -432,7 +418,7 @@ func referrerEvents(repo string, refs []Referrer, collectedAt time.Time, website
 		}
 		// Use a different hostname so github.com referrers are not stripped
 		// as self-referrals by Umami (which filters referrer_domain==hostname).
-		e := umamiEvent{Type: "event", ip: sessionIP(ref.Name), Payload: eventPayload{
+		e := umamiEvent{Type: "event", Payload: eventPayload{
 			Website: websiteID, Hostname: "traffic.github.com",
 			Screen: sessionScreen(ref.Name), Language: "en-US",
 			URL: "/" + repo, Referrer: referrerURL,
@@ -451,7 +437,7 @@ func pathEvents(repo string, paths []Path, collectedAt time.Time, websiteID stri
 	var out []umamiEvent
 	pathKey := "path/" + repo
 	for _, p := range paths {
-		e := umamiEvent{Type: "event", ip: sessionIP(pathKey), Payload: eventPayload{
+		e := umamiEvent{Type: "event", Payload: eventPayload{
 			Website: websiteID, Hostname: "github.com",
 			Screen: sessionScreen(pathKey), Language: "en-US",
 			URL: p.Path, Timestamp: ts,
@@ -499,10 +485,6 @@ func (p *pusher) sendEvent(e umamiEvent) error {
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", userAgent)
-	if e.ip != "" {
-		req.Header.Set("X-Forwarded-For", e.ip)
-	}
-
 	resp, err := p.httpClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("send: %w", err)

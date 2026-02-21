@@ -75,8 +75,9 @@ ghpush -pushed ~/.local/share/ghtraffic/pushed.db \
 | Referrers | Pageviews with Referrer field set |
 | Popular paths | Pageviews to the actual GitHub subpath |
 
-**Unique visitors:** Each repo+date combination is assigned a deterministic
-session fingerprint, so Umami shows roughly one unique visitor per active
-repo per day. These are not real human visitor counts — GitHub's traffic API
-does not expose individual visitor identities. Treat the visitor metric as an
-approximation of repository spread across days rather than actual people.
+**Unique visitors:** Umami deduplicates visitors by IP address. Since all
+events are pushed from a single server, Umami shows a small fixed visitor
+count regardless of actual traffic volume. **Ignore the visitor metric.**
+Use the **pageview count** for views and the **Pages breakdown** filtered
+to `/clone/` for clones — those counts are exact, derived directly from
+the GitHub traffic API.
