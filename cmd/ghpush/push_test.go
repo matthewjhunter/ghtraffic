@@ -42,16 +42,16 @@ func TestRepeatEvent_Count(t *testing.T) {
 func TestDayTimestamp_Historical(t *testing.T) {
 	ts := dayTimestamp("2026-02-15", "2026-02-21T09:00:00Z", "2026-02-21")
 	expected, _ := time.Parse("2006-01-02", "2026-02-15")
-	if ts != expected.UTC().UnixMilli() {
-		t.Errorf("historical timestamp = %d, want %d (UTC midnight 2026-02-15)", ts, expected.UTC().UnixMilli())
+	if ts != expected.UTC().Unix() {
+		t.Errorf("historical timestamp = %d, want %d (UTC midnight 2026-02-15)", ts, expected.UTC().Unix())
 	}
 }
 
 func TestDayTimestamp_Today(t *testing.T) {
 	ts := dayTimestamp("2026-02-21", "2026-02-21T09:30:00Z", "2026-02-21")
 	expected, _ := time.Parse(time.RFC3339, "2026-02-21T09:30:00Z")
-	if ts != expected.UTC().UnixMilli() {
-		t.Errorf("today timestamp = %d, want %d (CollectedAt)", ts, expected.UTC().UnixMilli())
+	if ts != expected.UTC().Unix() {
+		t.Errorf("today timestamp = %d, want %d (CollectedAt)", ts, expected.UTC().Unix())
 	}
 }
 
@@ -59,8 +59,8 @@ func TestDayTimestamp_TodayBadCollectedAt(t *testing.T) {
 	// Falls back to midnight when CollectedAt is unparseable.
 	ts := dayTimestamp("2026-02-21", "not-a-timestamp", "2026-02-21")
 	expected, _ := time.Parse("2006-01-02", "2026-02-21")
-	if ts != expected.UTC().UnixMilli() {
-		t.Errorf("fallback timestamp = %d, want %d (UTC midnight)", ts, expected.UTC().UnixMilli())
+	if ts != expected.UTC().Unix() {
+		t.Errorf("fallback timestamp = %d, want %d (UTC midnight)", ts, expected.UTC().Unix())
 	}
 }
 
@@ -171,8 +171,8 @@ func TestBuildEvents_TodayUsesCollectedAtTimestamp(t *testing.T) {
 
 	expected, _ := time.Parse(time.RFC3339, "2026-02-21T14:30:00Z")
 	for _, e := range events {
-		if e.Type == "event" && e.Payload.Name == "" && e.Payload.Timestamp != expected.UTC().UnixMilli() {
-			t.Errorf("today timestamp = %d, want %d (CollectedAt)", e.Payload.Timestamp, expected.UTC().UnixMilli())
+		if e.Type == "event" && e.Payload.Name == "" && e.Payload.Timestamp != expected.UTC().Unix() {
+			t.Errorf("today timestamp = %d, want %d (CollectedAt)", e.Payload.Timestamp, expected.UTC().Unix())
 		}
 	}
 }
@@ -191,8 +191,8 @@ func TestBuildEvents_HistoricalUsesMidnightTimestamp(t *testing.T) {
 
 	midnight, _ := time.Parse("2006-01-02", "2026-02-15")
 	for _, e := range events {
-		if e.Type == "event" && e.Payload.Name == "" && e.Payload.Timestamp != midnight.UTC().UnixMilli() {
-			t.Errorf("historical timestamp = %d, want %d (midnight)", e.Payload.Timestamp, midnight.UTC().UnixMilli())
+		if e.Type == "event" && e.Payload.Name == "" && e.Payload.Timestamp != midnight.UTC().Unix() {
+			t.Errorf("historical timestamp = %d, want %d (midnight)", e.Payload.Timestamp, midnight.UTC().Unix())
 		}
 	}
 }
@@ -488,11 +488,11 @@ func TestImportJSONState_NilDB(t *testing.T) {
 
 // --- pusher HTTP behavior ---
 
-func TestPusher_SendBatch_RequestShape(t *testing.T) {
-	var received []umamiEvent
+func TestPusher_SendEvent_RequestShape(t *testing.T) {
+	var received umamiEvent
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/batch" {
-			t.Errorf("path = %q, want /api/batch", r.URL.Path)
+		if r.URL.Path != "/api/send" {
+			t.Errorf("path = %q, want /api/send", r.URL.Path)
 		}
 		if r.Method != "POST" {
 			t.Errorf("method = %q, want POST", r.Method)
@@ -511,20 +511,18 @@ func TestPusher_SendBatch_RequestShape(t *testing.T) {
 	defer srv.Close()
 
 	p := &pusher{httpClient: srv.Client(), baseURL: srv.URL, batchSize: 100}
-	if err := p.pushAll([]umamiEvent{{Type: "event", Payload: eventPayload{Name: "github_view"}}}); err != nil {
+	if err := p.pushAll([]umamiEvent{{Type: "event", Payload: eventPayload{Name: "github_clone"}}}); err != nil {
 		t.Fatalf("pushAll: %v", err)
 	}
-	if len(received) != 1 {
-		t.Errorf("received %d events, want 1", len(received))
+	if received.Payload.Name != "github_clone" {
+		t.Errorf("received Name = %q, want github_clone", received.Payload.Name)
 	}
 }
 
-func TestPusher_BatchesBySize(t *testing.T) {
-	var batchSizes []int
+func TestPusher_SendsOneRequestPerEvent(t *testing.T) {
+	var callCount int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var events []umamiEvent
-		json.NewDecoder(r.Body).Decode(&events)
-		batchSizes = append(batchSizes, len(events))
+		callCount++
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer srv.Close()
@@ -537,11 +535,8 @@ func TestPusher_BatchesBySize(t *testing.T) {
 	if err := p.pushAll(events); err != nil {
 		t.Fatalf("pushAll: %v", err)
 	}
-	if len(batchSizes) != 3 {
-		t.Fatalf("got %d batches, want 3", len(batchSizes))
-	}
-	if batchSizes[0] != 3 || batchSizes[1] != 3 || batchSizes[2] != 1 {
-		t.Errorf("batchSizes = %v, want [3 3 1]", batchSizes)
+	if callCount != 7 {
+		t.Errorf("HTTP calls = %d, want 7 (one per event)", callCount)
 	}
 }
 

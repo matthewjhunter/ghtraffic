@@ -57,7 +57,11 @@ type umamiEvent struct {
 type eventPayload struct {
 	Website   string         `json:"website"`
 	Hostname  string         `json:"hostname"`
+	Screen    string         `json:"screen,omitempty"`
+	Language  string         `json:"language,omitempty"`
+	Title     string         `json:"title,omitempty"`
 	URL       string         `json:"url"`
+	Referrer  string         `json:"referrer,omitempty"`
 	Name      string         `json:"name,omitempty"`
 	Timestamp int64          `json:"timestamp"`
 	Data      map[string]any `json:"data,omitempty"`
@@ -331,6 +335,7 @@ func buildEvents(records []Record, websiteID string, st pushState, now time.Time
 			// No Name → Umami v2 treats this as a pageview (shows in main chart).
 			e := umamiEvent{Type: "event", Payload: eventPayload{
 				Website: websiteID, Hostname: "github.com",
+				Screen: "1920x1080", Language: "en-US",
 				URL: "/" + r.Repo, Timestamp: ts,
 			}}
 			events = append(events, repeatEvent(e, viewDelta)...)
@@ -338,6 +343,7 @@ func buildEvents(records []Record, websiteID string, st pushState, now time.Time
 		if cloneDelta > 0 {
 			e := umamiEvent{Type: "event", Payload: eventPayload{
 				Website: websiteID, Hostname: "github.com",
+				Screen: "1920x1080", Language: "en-US",
 				URL: "/" + r.Repo, Name: "github_clone",
 				Timestamp: ts, Data: map[string]any{"repo": r.Repo},
 			}}
@@ -373,26 +379,27 @@ func buildEvents(records []Record, websiteID string, st pushState, now time.Time
 	return events, next
 }
 
-// dayTimestamp returns the Umami event timestamp for a record in milliseconds.
-// Umami's batch API uses JavaScript-style millisecond timestamps.
+// dayTimestamp returns the Umami event timestamp for a record in Unix seconds.
+// Umami's /api/send endpoint uses Unix seconds for the timestamp field.
 // Historical dates use UTC midnight; today's date uses CollectedAt.
 func dayTimestamp(date, collectedAt, today string) int64 {
 	if date == today {
 		if t, err := time.Parse(time.RFC3339, collectedAt); err == nil {
-			return t.UTC().UnixMilli()
+			return t.UTC().Unix()
 		}
 	}
 	t, _ := time.Parse("2006-01-02", date)
-	return t.UTC().UnixMilli()
+	return t.UTC().Unix()
 }
 
 // referrerEvents builds one github_referrer event per referral hit.
 func referrerEvents(repo string, refs []Referrer, collectedAt time.Time, websiteID string) []umamiEvent {
-	ts := collectedAt.UTC().UnixMilli()
+	ts := collectedAt.UTC().Unix()
 	var out []umamiEvent
 	for _, ref := range refs {
 		e := umamiEvent{Type: "event", Payload: eventPayload{
 			Website: websiteID, Hostname: "github.com",
+			Screen: "1920x1080", Language: "en-US",
 			URL: "/" + repo, Name: "github_referrer",
 			Timestamp: ts, Data: map[string]any{"repo": repo, "referrer": ref.Name},
 		}}
@@ -405,11 +412,12 @@ func referrerEvents(repo string, refs []Referrer, collectedAt time.Time, website
 // This populates Umami's top-pages breakdown with the actual repo subpaths.
 // No Name → Umami v2 treats events without a name as pageviews.
 func pathEvents(_ string, paths []Path, collectedAt time.Time, websiteID string) []umamiEvent {
-	ts := collectedAt.UTC().UnixMilli()
+	ts := collectedAt.UTC().Unix()
 	var out []umamiEvent
 	for _, p := range paths {
 		e := umamiEvent{Type: "event", Payload: eventPayload{
 			Website: websiteID, Hostname: "github.com",
+			Screen: "1920x1080", Language: "en-US",
 			URL: p.Path, Timestamp: ts,
 		}}
 		out = append(out, repeatEvent(e, p.Count)...)
@@ -429,29 +437,28 @@ func repeatEvent(e umamiEvent, n int) []umamiEvent {
 	return out
 }
 
-// pusher sends batches of Umami events over HTTP.
+// pusher sends Umami events over HTTP to /api/send one at a time.
 type pusher struct {
 	httpClient *http.Client
 	baseURL    string
-	batchSize  int
+	batchSize  int // reserved for future rate-limiting; unused currently
 }
 
 func (p *pusher) pushAll(events []umamiEvent) error {
-	for i := 0; i < len(events); i += p.batchSize {
-		end := min(i+p.batchSize, len(events))
-		if err := p.sendBatch(events[i:end]); err != nil {
-			return fmt.Errorf("batch %d-%d: %w", i, end, err)
+	for i, e := range events {
+		if err := p.sendEvent(e); err != nil {
+			return fmt.Errorf("event %d: %w", i, err)
 		}
 	}
 	return nil
 }
 
-func (p *pusher) sendBatch(events []umamiEvent) error {
-	body, err := json.Marshal(events)
+func (p *pusher) sendEvent(e umamiEvent) error {
+	body, err := json.Marshal(e)
 	if err != nil {
 		return fmt.Errorf("marshal: %w", err)
 	}
-	req, err := http.NewRequest(http.MethodPost, p.baseURL+"/api/batch", bytes.NewReader(body))
+	req, err := http.NewRequest(http.MethodPost, p.baseURL+"/api/send", bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("build request: %w", err)
 	}
@@ -467,15 +474,6 @@ func (p *pusher) sendBatch(events []umamiEvent) error {
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, respBody)
-	}
-
-	// The batch API returns HTTP 200 even when events fail validation;
-	// check the response body for application-level errors.
-	var result struct {
-		Errors int `json:"errors"`
-	}
-	if err := json.Unmarshal(respBody, &result); err == nil && result.Errors > 0 {
-		return fmt.Errorf("batch rejected %d events: %s", result.Errors, respBody)
 	}
 	return nil
 }
