@@ -8,6 +8,9 @@
 //	ghtraffic -seen traffic.jsonl >> traffic.jsonl
 //	ghpush -pushed pushed.db < traffic.jsonl
 //
+// Use -init to bootstrap a fresh Umami site from all stored historical data,
+// ignoring any prior push state and resetting it afterwards.
+//
 // Environment variables:
 //
 //	UMAMI_URL        Base URL of your Umami instance (e.g. https://umami.example.com)
@@ -34,6 +37,7 @@ func main() {
 	pushedFile := flag.String("pushed", "", "SQLite state file tracking pushed counts (prevents re-pushing on re-run)")
 	batchSize := flag.Int("batch-size", 100, "events per POST to Umami /api/batch")
 	dryRun := flag.Bool("dry-run", false, "print events as JSON to stdout without sending")
+	init_ := flag.Bool("init", false, "bootstrap from scratch: ignore push state and push all historical data")
 	flag.Parse()
 
 	if !*dryRun {
@@ -55,9 +59,17 @@ func main() {
 		defer db.Close()
 	}
 
-	st, err := loadState(db)
-	if err != nil {
-		log.Fatalf("load state: %v", err)
+	// -init: treat all records as new regardless of stored state.
+	var st pushState
+	if *init_ {
+		st = newPushState()
+		log.Print("init mode: ignoring existing push state, all records will be sent")
+	} else {
+		var err error
+		st, err = loadState(db)
+		if err != nil {
+			log.Fatalf("load state: %v", err)
+		}
 	}
 
 	var records []Record
@@ -103,6 +115,13 @@ func main() {
 	}
 	if err := p.pushAll(events); err != nil {
 		log.Fatalf("push: %v", err)
+	}
+
+	// On -init, clear stale state before writing the fresh baseline.
+	if *init_ {
+		if err := resetState(db); err != nil {
+			log.Printf("warning: could not reset state db: %v", err)
+		}
 	}
 
 	if err := saveState(db, newSt); err != nil {

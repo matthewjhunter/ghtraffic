@@ -222,6 +222,25 @@ func saveState(db *sql.DB, st pushState) error {
 	return tx.Commit()
 }
 
+// resetState clears all persisted push state from the database. A nil db is a no-op.
+func resetState(db *sql.DB) error {
+	if db == nil {
+		return nil
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+	if _, err := tx.Exec(`DELETE FROM traffic`); err != nil {
+		return fmt.Errorf("clear traffic: %w", err)
+	}
+	if _, err := tx.Exec(`DELETE FROM snapshots`); err != nil {
+		return fmt.Errorf("clear snapshots: %w", err)
+	}
+	return tx.Commit()
+}
+
 // splitKey splits a "repo|date" key. repo is "owner/repo" (never contains "|").
 func splitKey(key string) (repo, date string, ok bool) {
 	return strings.Cut(key, "|")

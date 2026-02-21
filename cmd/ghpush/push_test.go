@@ -404,6 +404,40 @@ func TestSaveState_SnapshotIdempotent(t *testing.T) {
 	}
 }
 
+func TestResetState_ClearsAllTables(t *testing.T) {
+	db, err := openDB(":memory:")
+	if err != nil {
+		t.Fatalf("openDB: %v", err)
+	}
+	defer db.Close()
+
+	st := newPushState()
+	st.Traffic["a/b|2026-02-21"] = trafficCounts{Views: 10, Clones: 2}
+	st.Referrers["a/b|2026-02-21"] = true
+	st.Paths["a/b|2026-02-21"] = true
+	if err := saveState(db, st); err != nil {
+		t.Fatalf("saveState: %v", err)
+	}
+
+	if err := resetState(db); err != nil {
+		t.Fatalf("resetState: %v", err)
+	}
+
+	loaded, err := loadState(db)
+	if err != nil {
+		t.Fatalf("loadState after reset: %v", err)
+	}
+	if len(loaded.Traffic) != 0 || len(loaded.Referrers) != 0 || len(loaded.Paths) != 0 {
+		t.Errorf("expected empty state after reset, got %+v", loaded)
+	}
+}
+
+func TestResetState_NilDB(t *testing.T) {
+	if err := resetState(nil); err != nil {
+		t.Errorf("resetState(nil) should be a no-op, got: %v", err)
+	}
+}
+
 // --- pusher HTTP behavior ---
 
 func TestPusher_SendBatch_RequestShape(t *testing.T) {
