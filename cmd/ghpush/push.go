@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"net/http"
 	"os"
@@ -396,6 +397,16 @@ func dayTimestamp(date, collectedAt, today string) int64 {
 	return t.UTC().Unix()
 }
 
+// referrerScreen returns a deterministic screen resolution derived from the
+// referrer name. Umami's session is keyed on IP+UA+hostname+language+screen,
+// so giving each referrer source a unique screen forces a distinct session and
+// ensures all referrers appear separately in the dashboard.
+func referrerScreen(name string) string {
+	h := fnv.New32a()
+	h.Write([]byte(name))
+	return fmt.Sprintf("1920x%d", 900+h.Sum32()%1000)
+}
+
 // referrerEvents builds one pageview per referral hit with the Referrer
 // payload field set so Umami populates its built-in referrer breakdown.
 func referrerEvents(repo string, refs []Referrer, collectedAt time.Time, websiteID string) []umamiEvent {
@@ -408,7 +419,7 @@ func referrerEvents(repo string, refs []Referrer, collectedAt time.Time, website
 		}
 		e := umamiEvent{Type: "event", Payload: eventPayload{
 			Website: websiteID, Hostname: "github.com",
-			Screen: "1920x1080", Language: "en-US",
+			Screen: referrerScreen(ref.Name), Language: "en-US",
 			URL: "/" + repo, Referrer: referrerURL,
 			Timestamp: ts,
 		}}
