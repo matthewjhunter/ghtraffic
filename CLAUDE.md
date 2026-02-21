@@ -7,7 +7,7 @@ Authentication uses `GITHUB_TOKEN` env var, falling back to `gh auth token`.
 ## Binaries
 
 - **ghtraffic** — collects traffic data from GitHub API, writes NDJSON to stdout
-- **ghpush** (`cmd/ghpush/`) — reads ghtraffic NDJSON from stdin, pushes to Umami via `/api/batch`; requires Umami v2.17+
+- **ghpush** (`cmd/ghpush/`) — reads ghtraffic NDJSON from stdin, pushes to Umami via `/api/send`; requires Umami v2.17+
 
 Typical pipeline:
 
@@ -31,7 +31,6 @@ go build -o ghpush ./cmd/ghpush
 | `-url` | `UMAMI_URL` | Umami instance base URL |
 | `-website` | `UMAMI_WEBSITE_ID` | Website UUID from Umami settings |
 | `-pushed` | — | SQLite state file (`.db`) tracking pushed counts; prevents re-pushing on re-run |
-| `-batch-size` | — | Events per POST to `/api/batch` (default 100) |
 | `-dry-run` | — | Print events as JSON to stdout without sending |
 | `-init` | — | Bootstrap from scratch: ignore stored state, push all historical data, reset state baseline |
 | `-import-json` | — | Migrate a legacy JSON state file into the SQLite DB and exit (requires `-pushed`) |

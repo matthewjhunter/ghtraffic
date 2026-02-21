@@ -337,19 +337,21 @@ func buildEvents(records []Record, websiteID string, st pushState, now time.Time
 
 		if viewDelta > 0 {
 			// No Name → Umami v2 treats this as a pageview (shows in main chart).
+			// Session keyed on repo+date so each day's traffic for each repo
+			// appears as a distinct visitor in the Umami dashboard.
 			e := umamiEvent{Type: "event", Payload: eventPayload{
 				Website: websiteID, Hostname: "github.com",
-				Screen: "1920x1080", Language: "en-US",
+				Screen: sessionScreen(r.Repo + "|" + r.Date), Language: "en-US",
 				URL: "/" + r.Repo, Timestamp: ts,
 			}}
 			events = append(events, repeatEvent(e, viewDelta)...)
 		}
 		if cloneDelta > 0 {
-			// No Name → Umami treats this as a pageview, so clones count as
-			// unique visitors. URL prefix /clone/ distinguishes them from views.
+			// Clones as pageviews under /clone/ prefix with a distinct session
+			// key so they appear as separate visitors from view traffic.
 			e := umamiEvent{Type: "event", Payload: eventPayload{
 				Website: websiteID, Hostname: "github.com",
-				Screen: "1920x1080", Language: "en-US",
+				Screen: sessionScreen("clone/" + r.Repo + "|" + r.Date), Language: "en-US",
 				URL: "/clone/" + r.Repo, Timestamp: ts,
 			}}
 			events = append(events, repeatEvent(e, cloneDelta)...)
@@ -397,13 +399,14 @@ func dayTimestamp(date, collectedAt, today string) int64 {
 	return t.UTC().Unix()
 }
 
-// referrerScreen returns a deterministic screen resolution derived from the
-// referrer name. Umami's session is keyed on IP+UA+hostname+language+screen,
-// so giving each referrer source a unique screen forces a distinct session and
-// ensures all referrers appear separately in the dashboard.
-func referrerScreen(name string) string {
+// sessionScreen returns a deterministic screen resolution derived from key.
+// Umami's session is keyed on IP+UA+hostname+language+screen, so giving each
+// logical source a unique screen forces a distinct session. This produces one
+// unique visitor per key (e.g. "owner/repo|2026-02-15") rather than one global
+// visitor for the entire push run.
+func sessionScreen(key string) string {
 	h := fnv.New32a()
-	h.Write([]byte(name))
+	h.Write([]byte(key))
 	return fmt.Sprintf("1920x%d", 900+h.Sum32()%1000)
 }
 
@@ -421,7 +424,7 @@ func referrerEvents(repo string, refs []Referrer, collectedAt time.Time, website
 		// as self-referrals by Umami (which filters referrer_domain==hostname).
 		e := umamiEvent{Type: "event", Payload: eventPayload{
 			Website: websiteID, Hostname: "traffic.github.com",
-			Screen: referrerScreen(ref.Name), Language: "en-US",
+			Screen: sessionScreen(ref.Name), Language: "en-US",
 			URL: "/" + repo, Referrer: referrerURL,
 			Timestamp: ts,
 		}}
@@ -433,13 +436,13 @@ func referrerEvents(repo string, refs []Referrer, collectedAt time.Time, website
 // pathEvents builds one pageview per path hit using the GitHub path as the URL.
 // This populates Umami's top-pages breakdown with the actual repo subpaths.
 // No Name → Umami v2 treats events without a name as pageviews.
-func pathEvents(_ string, paths []Path, collectedAt time.Time, websiteID string) []umamiEvent {
+func pathEvents(repo string, paths []Path, collectedAt time.Time, websiteID string) []umamiEvent {
 	ts := collectedAt.UTC().Unix()
 	var out []umamiEvent
 	for _, p := range paths {
 		e := umamiEvent{Type: "event", Payload: eventPayload{
 			Website: websiteID, Hostname: "github.com",
-			Screen: "1920x1080", Language: "en-US",
+			Screen: sessionScreen("path/" + repo), Language: "en-US",
 			URL: p.Path, Timestamp: ts,
 		}}
 		out = append(out, repeatEvent(e, p.Count)...)
@@ -463,7 +466,6 @@ func repeatEvent(e umamiEvent, n int) []umamiEvent {
 type pusher struct {
 	httpClient *http.Client
 	baseURL    string
-	batchSize  int // reserved for future rate-limiting; unused currently
 }
 
 func (p *pusher) pushAll(events []umamiEvent) error {

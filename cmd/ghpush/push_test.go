@@ -512,7 +512,7 @@ func TestPusher_SendEvent_RequestShape(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	p := &pusher{httpClient: srv.Client(), baseURL: srv.URL, batchSize: 100}
+	p := &pusher{httpClient: srv.Client(), baseURL: srv.URL}
 	if err := p.pushAll([]umamiEvent{{Type: "event", Payload: eventPayload{Name: "github_clone"}}}); err != nil {
 		t.Fatalf("pushAll: %v", err)
 	}
@@ -529,7 +529,7 @@ func TestPusher_SendsOneRequestPerEvent(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	p := &pusher{httpClient: srv.Client(), baseURL: srv.URL, batchSize: 3}
+	p := &pusher{httpClient: srv.Client(), baseURL: srv.URL}
 	events := make([]umamiEvent, 7)
 	for i := range events {
 		events[i] = umamiEvent{Type: "event"}
@@ -548,7 +548,7 @@ func TestPusher_HTTPError(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	p := &pusher{httpClient: srv.Client(), baseURL: srv.URL, batchSize: 100}
+	p := &pusher{httpClient: srv.Client(), baseURL: srv.URL}
 	if err := p.pushAll([]umamiEvent{{Type: "event"}}); err == nil {
 		t.Error("expected error for HTTP 500, got nil")
 	}

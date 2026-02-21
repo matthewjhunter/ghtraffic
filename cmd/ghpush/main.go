@@ -35,7 +35,6 @@ func main() {
 	umamiURL := flag.String("url", envOrDefault("UMAMI_URL", ""), "Umami base URL (e.g. https://umami.example.com)")
 	websiteID := flag.String("website", envOrDefault("UMAMI_WEBSITE_ID", ""), "Umami website UUID")
 	pushedFile := flag.String("pushed", "", "SQLite state file tracking pushed counts (prevents re-pushing on re-run)")
-	batchSize := flag.Int("batch-size", 100, "events per POST to Umami /api/batch")
 	dryRun := flag.Bool("dry-run", false, "print events as JSON to stdout without sending")
 	init_ := flag.Bool("init", false, "bootstrap from scratch: ignore push state and push all historical data")
 	importJSON := flag.String("import-json", "", "import a legacy JSON state file into the SQLite DB and exit")
@@ -124,7 +123,6 @@ func main() {
 	p := &pusher{
 		httpClient: &http.Client{Timeout: 30 * time.Second},
 		baseURL:    *umamiURL,
-		batchSize:  *batchSize,
 	}
 	if err := p.pushAll(events); err != nil {
 		log.Fatalf("push: %v", err)
