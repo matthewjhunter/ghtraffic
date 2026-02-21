@@ -81,9 +81,10 @@ func TestBuildEvents_FirstRun_FullCount(t *testing.T) {
 
 	var views, clones int
 	for _, e := range events {
-		if e.Type == "event" && e.Payload.Name == "" {
+		switch e.Payload.URL {
+		case "/a/b":
 			views++
-		} else if e.Payload.Name == "github_clone" {
+		case "/clone/a/b":
 			clones++
 		}
 	}
@@ -117,9 +118,10 @@ func TestBuildEvents_Delta(t *testing.T) {
 
 	var views, clones int
 	for _, e := range events {
-		if e.Type == "event" && e.Payload.Name == "" {
+		switch e.Payload.URL {
+		case "/a/b":
 			views++
-		} else if e.Payload.Name == "github_clone" {
+		case "/clone/a/b":
 			clones++
 		}
 	}
@@ -151,8 +153,8 @@ func TestBuildEvents_NoNewTraffic(t *testing.T) {
 	events, _ := buildEvents(records, "uuid", st, now)
 
 	for _, e := range events {
-		if (e.Type == "event" && e.Payload.Name == "") || e.Payload.Name == "github_clone" {
-			t.Errorf("unexpected traffic event (type=%q name=%q) when counts unchanged", e.Type, e.Payload.Name)
+		if e.Payload.URL == "/a/b" || e.Payload.URL == "/clone/a/b" {
+			t.Errorf("unexpected traffic event (url=%q) when counts unchanged", e.Payload.URL)
 		}
 	}
 }

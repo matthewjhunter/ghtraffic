@@ -344,11 +344,12 @@ func buildEvents(records []Record, websiteID string, st pushState, now time.Time
 			events = append(events, repeatEvent(e, viewDelta)...)
 		}
 		if cloneDelta > 0 {
+			// No Name → Umami treats this as a pageview, so clones count as
+			// unique visitors. URL prefix /clone/ distinguishes them from views.
 			e := umamiEvent{Type: "event", Payload: eventPayload{
 				Website: websiteID, Hostname: "github.com",
 				Screen: "1920x1080", Language: "en-US",
-				URL: "/" + r.Repo, Name: "github_clone",
-				Timestamp: ts, Data: map[string]any{"repo": r.Repo},
+				URL: "/clone/" + r.Repo, Timestamp: ts,
 			}}
 			events = append(events, repeatEvent(e, cloneDelta)...)
 		}
