@@ -417,8 +417,10 @@ func referrerEvents(repo string, refs []Referrer, collectedAt time.Time, website
 		if !strings.Contains(ref.Name, "://") {
 			referrerURL = "https://" + ref.Name
 		}
+		// Use a different hostname so github.com referrers are not stripped
+		// as self-referrals by Umami (which filters referrer_domain==hostname).
 		e := umamiEvent{Type: "event", Payload: eventPayload{
-			Website: websiteID, Hostname: "github.com",
+			Website: websiteID, Hostname: "traffic.github.com",
 			Screen: referrerScreen(ref.Name), Language: "en-US",
 			URL: "/" + repo, Referrer: referrerURL,
 			Timestamp: ts,
