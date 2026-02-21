@@ -1,0 +1,115 @@
+// ghpush reads ghtraffic NDJSON from stdin and pushes the records to Umami
+// as custom events, using the /api/batch endpoint with historical timestamps.
+//
+// Requires Umami v2.17 or later (adds /api/batch and timestamp support).
+//
+// Usage:
+//
+//	ghtraffic -seen traffic.jsonl >> traffic.jsonl
+//	ghpush -pushed pushed.txt < traffic.jsonl
+//
+// Environment variables:
+//
+//	UMAMI_URL        Base URL of your Umami instance (e.g. https://umami.example.com)
+//	UMAMI_WEBSITE_ID Website UUID from Umami settings
+package main
+
+import (
+	"bufio"
+	"encoding/json"
+	"flag"
+	"log"
+	"net/http"
+	"os"
+	"time"
+)
+
+func main() {
+	log.SetOutput(os.Stderr)
+	log.SetFlags(0)
+
+	umamiURL := flag.String("url", envOrDefault("UMAMI_URL", ""), "Umami base URL (e.g. https://umami.example.com)")
+	websiteID := flag.String("website", envOrDefault("UMAMI_WEBSITE_ID", ""), "Umami website UUID")
+	pushedFile := flag.String("pushed", "", "state file tracking already-pushed records (prevents duplicates on re-run)")
+	batchSize := flag.Int("batch-size", 100, "events per POST to Umami /api/batch")
+	dryRun := flag.Bool("dry-run", false, "print events as JSON to stdout without sending")
+	flag.Parse()
+
+	if !*dryRun {
+		if *umamiURL == "" {
+			log.Fatal("no Umami URL: set UMAMI_URL or use -url")
+		}
+		if *websiteID == "" {
+			log.Fatal("no Umami website ID: set UMAMI_WEBSITE_ID or use -website")
+		}
+	}
+
+	pushed, err := loadPushed(*pushedFile)
+	if err != nil {
+		log.Fatalf("load pushed state: %v", err)
+	}
+
+	var records []Record
+	scanner := bufio.NewScanner(os.Stdin)
+	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
+	for scanner.Scan() {
+		var r Record
+		if err := json.Unmarshal(scanner.Bytes(), &r); err != nil {
+			log.Printf("skip malformed line: %v", err)
+			continue
+		}
+		if r.Repo == "" || r.Date == "" {
+			continue
+		}
+		records = append(records, r)
+	}
+	if err := scanner.Err(); err != nil {
+		log.Fatalf("read stdin: %v", err)
+	}
+
+	events, newKeys := buildEvents(records, *websiteID, pushed)
+	if len(events) == 0 {
+		log.Print("no new events to push")
+		return
+	}
+	log.Printf("pushing %d events to Umami", len(events))
+
+	if *dryRun {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		for _, e := range events {
+			if err := enc.Encode(e); err != nil {
+				log.Fatalf("encode: %v", err)
+			}
+		}
+		return
+	}
+
+	p := &pusher{
+		httpClient: &http.Client{Timeout: 30 * time.Second},
+		baseURL:    *umamiURL,
+		batchSize:  *batchSize,
+	}
+	if err := p.pushAll(events); err != nil {
+		log.Fatalf("push: %v", err)
+	}
+
+	if *pushedFile != "" {
+		for k := range newKeys {
+			pushed[k] = true
+		}
+		if err := savePushed(*pushedFile, pushed); err != nil {
+			// Non-fatal: push succeeded; warn so the user can investigate.
+			log.Printf("warning: could not save pushed state, next run may re-push: %v", err)
+		}
+	}
+
+	log.Print("done")
+}
+
+func envOrDefault(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
+}
