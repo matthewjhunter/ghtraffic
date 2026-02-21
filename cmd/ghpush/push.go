@@ -64,6 +64,10 @@ type eventPayload struct {
 // repo+date combination already present in pushed. Returns the events to send
 // and the set of new state keys generated (to be merged into pushed after a
 // successful send).
+//
+// Each view, clone, referral, and path hit is emitted as an individual event
+// so Umami's native event-count charts reflect actual traffic numbers without
+// any custom querying.
 func buildEvents(records []Record, websiteID string, pushed map[string]bool) ([]umamiEvent, map[string]bool) {
 	newKeys := make(map[string]bool)
 	var events []umamiEvent
@@ -78,17 +82,18 @@ func buildEvents(records []Record, websiteID string, pushed map[string]bool) ([]
 		}
 	}
 
-	// One github_traffic event per record.
+	// github_view and github_clone — one event per hit, per day.
 	for _, r := range records {
 		key := "t|" + r.Repo + "|" + r.Date
 		if pushed[key] {
 			continue
 		}
-		e, err := trafficEvent(r, websiteID)
+		vs, cs, err := trafficEvents(r, websiteID)
 		if err != nil {
 			continue // malformed date; skip
 		}
-		events = append(events, e)
+		events = append(events, vs...)
+		events = append(events, cs...)
 		newKeys[key] = true
 	}
 
@@ -116,78 +121,71 @@ func buildEvents(records []Record, websiteID string, pushed map[string]bool) ([]
 	return events, newKeys
 }
 
-// trafficEvent builds a github_traffic Umami event from a Record.
-func trafficEvent(r Record, websiteID string) (umamiEvent, error) {
+// trafficEvents returns one github_view event per view hit and one github_clone
+// event per clone hit for the given record. Umami's event count charts will
+// then display actual traffic numbers natively.
+func trafficEvents(r Record, websiteID string) (views, clones []umamiEvent, err error) {
 	t, err := time.Parse("2006-01-02", r.Date)
 	if err != nil {
-		return umamiEvent{}, fmt.Errorf("parse date %q: %w", r.Date, err)
+		return nil, nil, fmt.Errorf("parse date %q: %w", r.Date, err)
 	}
-	return umamiEvent{
-		Type: "event",
-		Payload: eventPayload{
-			Website:   websiteID,
-			Hostname:  "github.com",
-			URL:       "/" + r.Repo,
-			Name:      "github_traffic",
-			Timestamp: t.UTC().Unix(),
-			Data: map[string]any{
-				"repo":          r.Repo,
-				"views":         r.Views.Count,
-				"unique_views":  r.Views.Uniques,
-				"clones":        r.Clones.Count,
-				"unique_clones": r.Clones.Uniques,
-			},
-		},
-	}, nil
+	ts := t.UTC().Unix()
+	data := map[string]any{"repo": r.Repo}
+
+	view := umamiEvent{Type: "event", Payload: eventPayload{
+		Website: websiteID, Hostname: "github.com",
+		URL: "/" + r.Repo, Name: "github_view",
+		Timestamp: ts, Data: data,
+	}}
+	clone := umamiEvent{Type: "event", Payload: eventPayload{
+		Website: websiteID, Hostname: "github.com",
+		URL: "/" + r.Repo, Name: "github_clone",
+		Timestamp: ts, Data: data,
+	}}
+	return repeatEvent(view, r.Views.Count), repeatEvent(clone, r.Clones.Count), nil
 }
 
-// referrerEvents builds github_referrer events from a repo's referrer snapshot.
+// referrerEvents builds one github_referrer event per referral hit from a
+// repo's rolling referrer snapshot.
 func referrerEvents(repo string, refs []Referrer, collectedAt time.Time, websiteID string) []umamiEvent {
 	ts := collectedAt.UTC().Unix()
-	out := make([]umamiEvent, 0, len(refs))
+	var out []umamiEvent
 	for _, ref := range refs {
-		out = append(out, umamiEvent{
-			Type: "event",
-			Payload: eventPayload{
-				Website:   websiteID,
-				Hostname:  "github.com",
-				URL:       "/" + repo,
-				Name:      "github_referrer",
-				Timestamp: ts,
-				Data: map[string]any{
-					"repo":     repo,
-					"referrer": ref.Name,
-					"count":    ref.Count,
-					"uniques":  ref.Uniques,
-				},
-			},
-		})
+		e := umamiEvent{Type: "event", Payload: eventPayload{
+			Website: websiteID, Hostname: "github.com",
+			URL: "/" + repo, Name: "github_referrer",
+			Timestamp: ts, Data: map[string]any{"repo": repo, "referrer": ref.Name},
+		}}
+		out = append(out, repeatEvent(e, ref.Count)...)
 	}
 	return out
 }
 
-// pathEvents builds github_path events from a repo's popular-paths snapshot.
+// pathEvents builds one github_path event per hit from a repo's popular-paths
+// snapshot. The path string is used as the Umami URL so path-level breakdowns
+// work naturally in the Umami UI.
 func pathEvents(repo string, paths []Path, collectedAt time.Time, websiteID string) []umamiEvent {
 	ts := collectedAt.UTC().Unix()
-	out := make([]umamiEvent, 0, len(paths))
+	var out []umamiEvent
 	for _, p := range paths {
-		out = append(out, umamiEvent{
-			Type: "event",
-			Payload: eventPayload{
-				Website:   websiteID,
-				Hostname:  "github.com",
-				URL:       "/" + repo,
-				Name:      "github_path",
-				Timestamp: ts,
-				Data: map[string]any{
-					"repo":    repo,
-					"path":    p.Path,
-					"title":   p.Title,
-					"count":   p.Count,
-					"uniques": p.Uniques,
-				},
-			},
-		})
+		e := umamiEvent{Type: "event", Payload: eventPayload{
+			Website: websiteID, Hostname: "github.com",
+			URL: p.Path, Name: "github_path",
+			Timestamp: ts, Data: map[string]any{"repo": repo, "title": p.Title},
+		}}
+		out = append(out, repeatEvent(e, p.Count)...)
+	}
+	return out
+}
+
+// repeatEvent returns a slice of n copies of e. Returns nil if n <= 0.
+func repeatEvent(e umamiEvent, n int) []umamiEvent {
+	if n <= 0 {
+		return nil
+	}
+	out := make([]umamiEvent, n)
+	for i := range out {
+		out[i] = e
 	}
 	return out
 }
