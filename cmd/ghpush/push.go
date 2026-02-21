@@ -226,7 +226,7 @@ func saveState(db *sql.DB, st pushState) error {
 // jsonPushState mirrors the legacy JSON state file format used before the
 // SQLite migration. Field names match the original json tags exactly.
 type jsonPushState struct {
-	Traffic   map[string]struct {
+	Traffic map[string]struct {
 		Views  int `json:"views"`
 		Clones int `json:"clones"`
 	} `json:"traffic"`
