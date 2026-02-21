@@ -42,16 +42,16 @@ func TestRepeatEvent_Count(t *testing.T) {
 func TestDayTimestamp_Historical(t *testing.T) {
 	ts := dayTimestamp("2026-02-15", "2026-02-21T09:00:00Z", "2026-02-21")
 	expected, _ := time.Parse("2006-01-02", "2026-02-15")
-	if ts != expected.UTC().Unix() {
-		t.Errorf("historical timestamp = %d, want %d (UTC midnight 2026-02-15)", ts, expected.UTC().Unix())
+	if ts != expected.UTC().UnixMilli() {
+		t.Errorf("historical timestamp = %d, want %d (UTC midnight 2026-02-15)", ts, expected.UTC().UnixMilli())
 	}
 }
 
 func TestDayTimestamp_Today(t *testing.T) {
 	ts := dayTimestamp("2026-02-21", "2026-02-21T09:30:00Z", "2026-02-21")
 	expected, _ := time.Parse(time.RFC3339, "2026-02-21T09:30:00Z")
-	if ts != expected.UTC().Unix() {
-		t.Errorf("today timestamp = %d, want %d (CollectedAt)", ts, expected.UTC().Unix())
+	if ts != expected.UTC().UnixMilli() {
+		t.Errorf("today timestamp = %d, want %d (CollectedAt)", ts, expected.UTC().UnixMilli())
 	}
 }
 
@@ -59,8 +59,8 @@ func TestDayTimestamp_TodayBadCollectedAt(t *testing.T) {
 	// Falls back to midnight when CollectedAt is unparseable.
 	ts := dayTimestamp("2026-02-21", "not-a-timestamp", "2026-02-21")
 	expected, _ := time.Parse("2006-01-02", "2026-02-21")
-	if ts != expected.UTC().Unix() {
-		t.Errorf("fallback timestamp = %d, want %d (UTC midnight)", ts, expected.UTC().Unix())
+	if ts != expected.UTC().UnixMilli() {
+		t.Errorf("fallback timestamp = %d, want %d (UTC midnight)", ts, expected.UTC().UnixMilli())
 	}
 }
 
@@ -171,8 +171,8 @@ func TestBuildEvents_TodayUsesCollectedAtTimestamp(t *testing.T) {
 
 	expected, _ := time.Parse(time.RFC3339, "2026-02-21T14:30:00Z")
 	for _, e := range events {
-		if e.Type == "event" && e.Payload.Name == "" && e.Payload.Timestamp != expected.UTC().Unix() {
-			t.Errorf("today timestamp = %d, want %d (CollectedAt)", e.Payload.Timestamp, expected.UTC().Unix())
+		if e.Type == "event" && e.Payload.Name == "" && e.Payload.Timestamp != expected.UTC().UnixMilli() {
+			t.Errorf("today timestamp = %d, want %d (CollectedAt)", e.Payload.Timestamp, expected.UTC().UnixMilli())
 		}
 	}
 }
@@ -191,8 +191,8 @@ func TestBuildEvents_HistoricalUsesMidnightTimestamp(t *testing.T) {
 
 	midnight, _ := time.Parse("2006-01-02", "2026-02-15")
 	for _, e := range events {
-		if e.Type == "event" && e.Payload.Name == "" && e.Payload.Timestamp != midnight.UTC().Unix() {
-			t.Errorf("historical timestamp = %d, want %d (midnight)", e.Payload.Timestamp, midnight.UTC().Unix())
+		if e.Type == "event" && e.Payload.Name == "" && e.Payload.Timestamp != midnight.UTC().UnixMilli() {
+			t.Errorf("historical timestamp = %d, want %d (midnight)", e.Payload.Timestamp, midnight.UTC().UnixMilli())
 		}
 	}
 }

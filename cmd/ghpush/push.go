@@ -373,21 +373,22 @@ func buildEvents(records []Record, websiteID string, st pushState, now time.Time
 	return events, next
 }
 
-// dayTimestamp returns the Umami event timestamp for a record.
+// dayTimestamp returns the Umami event timestamp for a record in milliseconds.
+// Umami's batch API uses JavaScript-style millisecond timestamps.
 // Historical dates use UTC midnight; today's date uses CollectedAt.
 func dayTimestamp(date, collectedAt, today string) int64 {
 	if date == today {
 		if t, err := time.Parse(time.RFC3339, collectedAt); err == nil {
-			return t.UTC().Unix()
+			return t.UTC().UnixMilli()
 		}
 	}
 	t, _ := time.Parse("2006-01-02", date)
-	return t.UTC().Unix()
+	return t.UTC().UnixMilli()
 }
 
 // referrerEvents builds one github_referrer event per referral hit.
 func referrerEvents(repo string, refs []Referrer, collectedAt time.Time, websiteID string) []umamiEvent {
-	ts := collectedAt.UTC().Unix()
+	ts := collectedAt.UTC().UnixMilli()
 	var out []umamiEvent
 	for _, ref := range refs {
 		e := umamiEvent{Type: "event", Payload: eventPayload{
@@ -404,7 +405,7 @@ func referrerEvents(repo string, refs []Referrer, collectedAt time.Time, website
 // This populates Umami's top-pages breakdown with the actual repo subpaths.
 // No Name → Umami v2 treats events without a name as pageviews.
 func pathEvents(_ string, paths []Path, collectedAt time.Time, websiteID string) []umamiEvent {
-	ts := collectedAt.UTC().Unix()
+	ts := collectedAt.UTC().UnixMilli()
 	var out []umamiEvent
 	for _, p := range paths {
 		e := umamiEvent{Type: "event", Payload: eventPayload{
