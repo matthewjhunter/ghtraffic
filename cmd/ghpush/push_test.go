@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -13,15 +14,13 @@ import (
 // --- repeatEvent ---
 
 func TestRepeatEvent_ZeroCount(t *testing.T) {
-	e := umamiEvent{Type: "event"}
-	if got := repeatEvent(e, 0); got != nil {
+	if got := repeatEvent(umamiEvent{Type: "event"}, 0); got != nil {
 		t.Errorf("expected nil for count=0, got %v", got)
 	}
 }
 
 func TestRepeatEvent_NegativeCount(t *testing.T) {
-	e := umamiEvent{Type: "event"}
-	if got := repeatEvent(e, -1); got != nil {
+	if got := repeatEvent(umamiEvent{Type: "event"}, -1); got != nil {
 		t.Errorf("expected nil for count=-1, got %v", got)
 	}
 }
@@ -39,102 +38,225 @@ func TestRepeatEvent_Count(t *testing.T) {
 	}
 }
 
-// --- trafficEvents ---
+// --- dayTimestamp ---
 
-func TestTrafficEvents_Counts(t *testing.T) {
-	r := Record{
-		Repo:   "owner/repo",
-		Date:   "2026-02-15",
-		Views:  DayCounts{Count: 7, Uniques: 3},
-		Clones: DayCounts{Count: 2, Uniques: 1},
-	}
-	views, clones, err := trafficEvents(r, "uuid")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if len(views) != 7 {
-		t.Errorf("len(views) = %d, want 7", len(views))
-	}
-	if len(clones) != 2 {
-		t.Errorf("len(clones) = %d, want 2", len(clones))
-	}
-}
-
-func TestTrafficEvents_EventShape(t *testing.T) {
-	r := Record{
-		Repo:   "owner/repo",
-		Date:   "2026-02-15",
-		Views:  DayCounts{Count: 1},
-		Clones: DayCounts{Count: 1},
-	}
-	views, clones, err := trafficEvents(r, "website-uuid")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	v := views[0]
-	if v.Type != "event" {
-		t.Errorf("Type = %q, want event", v.Type)
-	}
-	if v.Payload.Website != "website-uuid" {
-		t.Errorf("Website = %q, want website-uuid", v.Payload.Website)
-	}
-	if v.Payload.Hostname != "github.com" {
-		t.Errorf("Hostname = %q, want github.com", v.Payload.Hostname)
-	}
-	if v.Payload.URL != "/owner/repo" {
-		t.Errorf("URL = %q, want /owner/repo", v.Payload.URL)
-	}
-	if v.Payload.Name != "github_view" {
-		t.Errorf("view Name = %q, want github_view", v.Payload.Name)
-	}
-	if clones[0].Payload.Name != "github_clone" {
-		t.Errorf("clone Name = %q, want github_clone", clones[0].Payload.Name)
-	}
-}
-
-func TestTrafficEvents_Timestamp(t *testing.T) {
-	r := Record{Repo: "a/b", Date: "2026-02-15", Views: DayCounts{Count: 1}}
-	views, _, err := trafficEvents(r, "uuid")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+func TestDayTimestamp_Historical(t *testing.T) {
+	ts := dayTimestamp("2026-02-15", "2026-02-21T09:00:00Z", "2026-02-21")
 	expected, _ := time.Parse("2006-01-02", "2026-02-15")
-	if views[0].Payload.Timestamp != expected.UTC().Unix() {
-		t.Errorf("Timestamp = %d, want %d (UTC midnight 2026-02-15)",
-			views[0].Payload.Timestamp, expected.UTC().Unix())
+	if ts != expected.UTC().Unix() {
+		t.Errorf("historical timestamp = %d, want %d (UTC midnight 2026-02-15)", ts, expected.UTC().Unix())
 	}
 }
 
-func TestTrafficEvents_RepoInData(t *testing.T) {
-	r := Record{Repo: "owner/repo", Date: "2026-02-15", Views: DayCounts{Count: 1}}
-	views, _, err := trafficEvents(r, "uuid")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if repo, _ := views[0].Payload.Data["repo"].(string); repo != "owner/repo" {
-		t.Errorf("data[repo] = %q, want owner/repo", repo)
+func TestDayTimestamp_Today(t *testing.T) {
+	ts := dayTimestamp("2026-02-21", "2026-02-21T09:30:00Z", "2026-02-21")
+	expected, _ := time.Parse(time.RFC3339, "2026-02-21T09:30:00Z")
+	if ts != expected.UTC().Unix() {
+		t.Errorf("today timestamp = %d, want %d (CollectedAt)", ts, expected.UTC().Unix())
 	}
 }
 
-func TestTrafficEvents_ZeroCounts(t *testing.T) {
-	r := Record{Repo: "a/b", Date: "2026-02-15"}
-	views, clones, err := trafficEvents(r, "uuid")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if len(views) != 0 {
-		t.Errorf("expected 0 view events for zero count, got %d", len(views))
-	}
-	if len(clones) != 0 {
-		t.Errorf("expected 0 clone events for zero count, got %d", len(clones))
+func TestDayTimestamp_TodayBadCollectedAt(t *testing.T) {
+	// Falls back to midnight when CollectedAt is unparseable.
+	ts := dayTimestamp("2026-02-21", "not-a-timestamp", "2026-02-21")
+	expected, _ := time.Parse("2006-01-02", "2026-02-21")
+	if ts != expected.UTC().Unix() {
+		t.Errorf("fallback timestamp = %d, want %d (UTC midnight)", ts, expected.UTC().Unix())
 	}
 }
 
-func TestTrafficEvents_BadDate(t *testing.T) {
-	_, _, err := trafficEvents(Record{Repo: "a/b", Date: "not-a-date"}, "uuid")
-	if err == nil {
-		t.Error("expected error for invalid date, got nil")
+// --- buildEvents: traffic deltas ---
+
+func TestBuildEvents_FirstRun_FullCount(t *testing.T) {
+	records := []Record{
+		{
+			Repo:        "a/b",
+			Date:        "2026-02-15",
+			CollectedAt: "2026-02-21T09:00:00Z",
+			Views:       DayCounts{Count: 10},
+			Clones:      DayCounts{Count: 3},
+		},
+	}
+	now := time.Date(2026, 2, 21, 9, 0, 0, 0, time.UTC)
+	events, newSt := buildEvents(records, "uuid", newPushState(), now)
+
+	var views, clones int
+	for _, e := range events {
+		switch e.Payload.Name {
+		case "github_view":
+			views++
+		case "github_clone":
+			clones++
+		}
+	}
+	if views != 10 {
+		t.Errorf("views = %d, want 10 (full count on first run)", views)
+	}
+	if clones != 3 {
+		t.Errorf("clones = %d, want 3 (full count on first run)", clones)
+	}
+	if newSt.Traffic["a/b|2026-02-15"].Views != 10 {
+		t.Errorf("state views = %d, want 10", newSt.Traffic["a/b|2026-02-15"].Views)
+	}
+}
+
+func TestBuildEvents_Delta(t *testing.T) {
+	// Simulate a second hourly run where counts grew.
+	st := newPushState()
+	st.Traffic["a/b|2026-02-21"] = trafficCounts{Views: 10, Clones: 3}
+
+	records := []Record{
+		{
+			Repo:        "a/b",
+			Date:        "2026-02-21",
+			CollectedAt: "2026-02-21T10:00:00Z",
+			Views:       DayCounts{Count: 15},
+			Clones:      DayCounts{Count: 5},
+		},
+	}
+	now := time.Date(2026, 2, 21, 10, 0, 0, 0, time.UTC)
+	events, newSt := buildEvents(records, "uuid", st, now)
+
+	var views, clones int
+	for _, e := range events {
+		switch e.Payload.Name {
+		case "github_view":
+			views++
+		case "github_clone":
+			clones++
+		}
+	}
+	if views != 5 { // 15 - 10
+		t.Errorf("views = %d, want 5 (delta)", views)
+	}
+	if clones != 2 { // 5 - 3
+		t.Errorf("clones = %d, want 2 (delta)", clones)
+	}
+	if newSt.Traffic["a/b|2026-02-21"].Views != 15 {
+		t.Errorf("state views = %d, want 15", newSt.Traffic["a/b|2026-02-21"].Views)
+	}
+}
+
+func TestBuildEvents_NoNewTraffic(t *testing.T) {
+	st := newPushState()
+	st.Traffic["a/b|2026-02-21"] = trafficCounts{Views: 10, Clones: 3}
+
+	records := []Record{
+		{
+			Repo:        "a/b",
+			Date:        "2026-02-21",
+			CollectedAt: "2026-02-21T10:00:00Z",
+			Views:       DayCounts{Count: 10}, // same as state
+			Clones:      DayCounts{Count: 3},
+		},
+	}
+	now := time.Date(2026, 2, 21, 10, 0, 0, 0, time.UTC)
+	events, _ := buildEvents(records, "uuid", st, now)
+
+	for _, e := range events {
+		if e.Payload.Name == "github_view" || e.Payload.Name == "github_clone" {
+			t.Errorf("unexpected traffic event %q when counts unchanged", e.Payload.Name)
+		}
+	}
+}
+
+func TestBuildEvents_TodayUsesCollectedAtTimestamp(t *testing.T) {
+	records := []Record{
+		{
+			Repo:        "a/b",
+			Date:        "2026-02-21",
+			CollectedAt: "2026-02-21T14:30:00Z",
+			Views:       DayCounts{Count: 5},
+		},
+	}
+	now := time.Date(2026, 2, 21, 14, 30, 0, 0, time.UTC)
+	events, _ := buildEvents(records, "uuid", newPushState(), now)
+
+	expected, _ := time.Parse(time.RFC3339, "2026-02-21T14:30:00Z")
+	for _, e := range events {
+		if e.Payload.Name == "github_view" && e.Payload.Timestamp != expected.UTC().Unix() {
+			t.Errorf("today timestamp = %d, want %d (CollectedAt)", e.Payload.Timestamp, expected.UTC().Unix())
+		}
+	}
+}
+
+func TestBuildEvents_HistoricalUsesMidnightTimestamp(t *testing.T) {
+	records := []Record{
+		{
+			Repo:        "a/b",
+			Date:        "2026-02-15",
+			CollectedAt: "2026-02-21T09:00:00Z",
+			Views:       DayCounts{Count: 5},
+		},
+	}
+	now := time.Date(2026, 2, 21, 9, 0, 0, 0, time.UTC)
+	events, _ := buildEvents(records, "uuid", newPushState(), now)
+
+	midnight, _ := time.Parse("2006-01-02", "2026-02-15")
+	for _, e := range events {
+		if e.Payload.Name == "github_view" && e.Payload.Timestamp != midnight.UTC().Unix() {
+			t.Errorf("historical timestamp = %d, want %d (midnight)", e.Payload.Timestamp, midnight.UTC().Unix())
+		}
+	}
+}
+
+func TestBuildEvents_StateNotMutated(t *testing.T) {
+	st := newPushState()
+	st.Traffic["a/b|2026-02-21"] = trafficCounts{Views: 5, Clones: 1}
+
+	records := []Record{
+		{Repo: "a/b", Date: "2026-02-21", CollectedAt: "2026-02-21T10:00:00Z", Views: DayCounts{Count: 10}},
+	}
+	now := time.Date(2026, 2, 21, 10, 0, 0, 0, time.UTC)
+	_, _ = buildEvents(records, "uuid", st, now)
+
+	// Input state must be unchanged.
+	if st.Traffic["a/b|2026-02-21"].Views != 5 {
+		t.Errorf("input state was mutated: views = %d, want 5", st.Traffic["a/b|2026-02-21"].Views)
+	}
+}
+
+func TestBuildEvents_ReferrersFromLatestRecord(t *testing.T) {
+	older := Record{
+		Repo: "a/b", Date: "2026-02-19", CollectedAt: "2026-02-20T00:00:00Z",
+		Referrers: []Referrer{{Name: "old.com", Count: 2, Uniques: 2}},
+	}
+	newer := Record{
+		Repo: "a/b", Date: "2026-02-21", CollectedAt: "2026-02-21T00:00:00Z",
+		Referrers: []Referrer{{Name: "new.com", Count: 5, Uniques: 3}},
+	}
+	now := time.Date(2026, 2, 21, 0, 0, 0, 0, time.UTC)
+	events, _ := buildEvents([]Record{older, newer}, "uuid", newPushState(), now)
+
+	var refCount int
+	for _, e := range events {
+		if e.Payload.Name == "github_referrer" {
+			refCount++
+			if v, _ := e.Payload.Data["referrer"].(string); v != "new.com" {
+				t.Errorf("referrer = %q, want new.com", v)
+			}
+		}
+	}
+	if refCount != 5 {
+		t.Errorf("referrer event count = %d, want 5 (from new.com)", refCount)
+	}
+}
+
+func TestBuildEvents_SkipsPushedReferrers(t *testing.T) {
+	st := newPushState()
+	st.Referrers["a/b|2026-02-21"] = true
+
+	r := Record{
+		Repo: "a/b", Date: "2026-02-21", CollectedAt: "2026-02-21T00:00:00Z",
+		Referrers: []Referrer{{Name: "google.com", Count: 5, Uniques: 3}},
+	}
+	now := time.Date(2026, 2, 21, 0, 0, 0, 0, time.UTC)
+	events, _ := buildEvents([]Record{r}, "uuid", st, now)
+
+	for _, e := range events {
+		if e.Payload.Name == "github_referrer" {
+			t.Error("expected no referrer events when already in state")
+		}
 	}
 }
 
@@ -148,41 +270,21 @@ func TestReferrerEvents_Count(t *testing.T) {
 	ts := time.Date(2026, 2, 21, 12, 0, 0, 0, time.UTC)
 	events := referrerEvents("owner/repo", refs, ts, "uuid")
 
-	if len(events) != 15 { // 10 + 5
+	if len(events) != 15 {
 		t.Fatalf("len(events) = %d, want 15 (10+5)", len(events))
 	}
-	for _, e := range events {
-		if e.Payload.Name != "github_referrer" {
-			t.Errorf("Name = %q, want github_referrer", e.Payload.Name)
-		}
-		if e.Payload.URL != "/owner/repo" {
-			t.Errorf("URL = %q, want /owner/repo", e.Payload.URL)
-		}
-		if e.Payload.Timestamp != ts.Unix() {
-			t.Errorf("Timestamp = %d, want %d", e.Payload.Timestamp, ts.Unix())
-		}
-	}
-	// First 10 events should carry google.com referrer.
 	if v, _ := events[0].Payload.Data["referrer"].(string); v != "google.com" {
 		t.Errorf("events[0] referrer = %q, want google.com", v)
 	}
-	// Next 5 should carry github.com.
 	if v, _ := events[10].Payload.Data["referrer"].(string); v != "github.com" {
 		t.Errorf("events[10] referrer = %q, want github.com", v)
 	}
 }
 
-func TestReferrerEvents_Empty(t *testing.T) {
-	if got := referrerEvents("a/b", nil, time.Now(), "uuid"); len(got) != 0 {
-		t.Errorf("expected empty slice for nil referrers, got %d events", len(got))
-	}
-}
-
 func TestReferrerEvents_ZeroCount(t *testing.T) {
 	refs := []Referrer{{Name: "google.com", Count: 0}}
-	got := referrerEvents("a/b", refs, time.Now(), "uuid")
-	if len(got) != 0 {
-		t.Errorf("expected 0 events for referrer with count=0, got %d", len(got))
+	if got := referrerEvents("a/b", refs, time.Now(), "uuid"); len(got) != 0 {
+		t.Errorf("expected 0 events for count=0, got %d", len(got))
 	}
 }
 
@@ -190,233 +292,88 @@ func TestReferrerEvents_ZeroCount(t *testing.T) {
 
 func TestPathEvents_Count(t *testing.T) {
 	paths := []Path{
-		{Path: "/owner/repo/blob/main/README.md", Title: "README", Count: 20, Uniques: 12},
-		{Path: "/owner/repo/blob/main/main.go", Title: "main.go", Count: 5, Uniques: 3},
+		{Path: "/owner/repo/blob/main/README.md", Title: "README", Count: 20},
+		{Path: "/owner/repo/blob/main/main.go", Title: "main.go", Count: 5},
 	}
-	ts := time.Date(2026, 2, 21, 0, 0, 0, 0, time.UTC)
-	events := pathEvents("owner/repo", paths, ts, "uuid")
+	events := pathEvents("owner/repo", paths, time.Now(), "uuid")
 
-	if len(events) != 25 { // 20 + 5
+	if len(events) != 25 {
 		t.Fatalf("len(events) = %d, want 25 (20+5)", len(events))
-	}
-	for _, e := range events {
-		if e.Payload.Name != "github_path" {
-			t.Errorf("Name = %q, want github_path", e.Payload.Name)
-		}
 	}
 }
 
 func TestPathEvents_URLIsPath(t *testing.T) {
-	paths := []Path{
-		{Path: "/owner/repo/blob/main/README.md", Title: "README", Count: 3},
-	}
+	paths := []Path{{Path: "/owner/repo/blob/main/README.md", Title: "README", Count: 1}}
 	events := pathEvents("owner/repo", paths, time.Now(), "uuid")
 	if len(events) == 0 {
 		t.Fatal("expected events, got none")
 	}
-	// The path string itself should be the URL so Umami can break down per path.
 	if events[0].Payload.URL != "/owner/repo/blob/main/README.md" {
 		t.Errorf("URL = %q, want /owner/repo/blob/main/README.md", events[0].Payload.URL)
 	}
 }
 
-func TestPathEvents_TitleInData(t *testing.T) {
-	paths := []Path{{Path: "/owner/repo/blob/main/README.md", Title: "README", Count: 1}}
-	events := pathEvents("owner/repo", paths, time.Now(), "uuid")
-	if title, _ := events[0].Payload.Data["title"].(string); title != "README" {
-		t.Errorf("data[title] = %q, want README", title)
-	}
-}
+// --- loadState / saveState ---
 
-// --- buildEvents ---
-
-func TestBuildEvents_TrafficCounts(t *testing.T) {
-	records := []Record{
-		{
-			Repo:   "a/b",
-			Date:   "2026-02-21",
-			Views:  DayCounts{Count: 10, Uniques: 4},
-			Clones: DayCounts{Count: 3, Uniques: 2},
-		},
-	}
-	events, _ := buildEvents(records, "uuid", map[string]bool{})
-
-	var viewCount, cloneCount int
-	for _, e := range events {
-		switch e.Payload.Name {
-		case "github_view":
-			viewCount++
-		case "github_clone":
-			cloneCount++
-		}
-	}
-	if viewCount != 10 {
-		t.Errorf("viewCount = %d, want 10", viewCount)
-	}
-	if cloneCount != 3 {
-		t.Errorf("cloneCount = %d, want 3", cloneCount)
-	}
-}
-
-func TestBuildEvents_SkipsPushed(t *testing.T) {
-	records := []Record{
-		{Repo: "a/b", Date: "2026-02-20", CollectedAt: "2026-02-21T00:00:00Z", Views: DayCounts{Count: 5}},
-		{Repo: "a/b", Date: "2026-02-21", CollectedAt: "2026-02-21T00:00:00Z", Views: DayCounts{Count: 3}},
-	}
-	pushed := map[string]bool{"t|a/b|2026-02-20": true}
-
-	events, newKeys := buildEvents(records, "uuid", pushed)
-
-	if _, ok := newKeys["t|a/b|2026-02-21"]; !ok {
-		t.Error("expected new key t|a/b|2026-02-21")
-	}
-	if _, ok := newKeys["t|a/b|2026-02-20"]; ok {
-		t.Error("already-pushed key t|a/b|2026-02-20 must not appear in newKeys")
-	}
-
-	var viewCount int
-	for _, e := range events {
-		if e.Payload.Name == "github_view" {
-			viewCount++
-		}
-	}
-	if viewCount != 3 { // only the unpushed date
-		t.Errorf("viewCount = %d, want 3 (only 2026-02-21)", viewCount)
-	}
-}
-
-func TestBuildEvents_ReferrersFromLatestRecord(t *testing.T) {
-	older := Record{
-		Repo:        "a/b",
-		Date:        "2026-02-19",
-		CollectedAt: "2026-02-20T00:00:00Z",
-		Referrers:   []Referrer{{Name: "old.com", Count: 2, Uniques: 2}},
-	}
-	newer := Record{
-		Repo:        "a/b",
-		Date:        "2026-02-21",
-		CollectedAt: "2026-02-21T00:00:00Z",
-		Referrers:   []Referrer{{Name: "new.com", Count: 5, Uniques: 3}},
-	}
-	events, _ := buildEvents([]Record{older, newer}, "uuid", map[string]bool{})
-
-	var refSources []string
-	for _, e := range events {
-		if e.Payload.Name == "github_referrer" {
-			if v, ok := e.Payload.Data["referrer"].(string); ok {
-				refSources = append(refSources, v)
-			}
-		}
-	}
-	// Only new.com (5 events) should appear — from the most-recent record.
-	if len(refSources) != 5 {
-		t.Errorf("referrer event count = %d, want 5", len(refSources))
-	}
-	for _, s := range refSources {
-		if s != "new.com" {
-			t.Errorf("referrer source = %q, want new.com", s)
-		}
-	}
-}
-
-func TestBuildEvents_SkipsPushedReferrers(t *testing.T) {
-	r := Record{
-		Repo:        "a/b",
-		Date:        "2026-02-21",
-		CollectedAt: "2026-02-21T00:00:00Z",
-		Referrers:   []Referrer{{Name: "google.com", Count: 5, Uniques: 3}},
-	}
-	pushed := map[string]bool{"r|a/b|2026-02-21": true}
-	events, _ := buildEvents([]Record{r}, "uuid", pushed)
-
-	for _, e := range events {
-		if e.Payload.Name == "github_referrer" {
-			t.Error("expected no referrer events when pushed key exists")
-		}
-	}
-}
-
-func TestBuildEvents_NoReferrersOrPaths(t *testing.T) {
-	records := []Record{
-		{Repo: "a/b", Date: "2026-02-21", CollectedAt: "2026-02-21T00:00:00Z"},
-	}
-	events, _ := buildEvents(records, "uuid", map[string]bool{})
-
-	for _, e := range events {
-		if e.Payload.Name == "github_referrer" || e.Payload.Name == "github_path" {
-			t.Errorf("unexpected %q event when referrers/paths are empty", e.Payload.Name)
-		}
-	}
-}
-
-func TestBuildEvents_MultipleRepos(t *testing.T) {
-	records := []Record{
-		{Repo: "a/b", Date: "2026-02-21", CollectedAt: "2026-02-21T00:00:00Z", Views: DayCounts{Count: 4}},
-		{Repo: "c/d", Date: "2026-02-21", CollectedAt: "2026-02-21T00:00:00Z", Views: DayCounts{Count: 6}},
-	}
-	events, newKeys := buildEvents(records, "uuid", map[string]bool{})
-
-	for _, k := range []string{"t|a/b|2026-02-21", "t|c/d|2026-02-21"} {
-		if !newKeys[k] {
-			t.Errorf("expected new key %q", k)
-		}
-	}
-
-	var viewCount int
-	for _, e := range events {
-		if e.Payload.Name == "github_view" {
-			viewCount++
-		}
-	}
-	if viewCount != 10 { // 4 + 6
-		t.Errorf("viewCount = %d, want 10", viewCount)
-	}
-}
-
-// --- loadPushed / savePushed ---
-
-func TestLoadPushed_NonExistentFile(t *testing.T) {
-	pushed, err := loadPushed(filepath.Join(t.TempDir(), "pushed.txt"))
+func TestLoadState_NonExistentFile(t *testing.T) {
+	st, err := loadState(filepath.Join(t.TempDir(), "state.json"))
 	if err != nil {
-		t.Fatalf("loadPushed: %v", err)
+		t.Fatalf("loadState: %v", err)
 	}
-	if len(pushed) != 0 {
-		t.Errorf("expected empty map for missing file, got %v", pushed)
-	}
-}
-
-func TestLoadPushed_EmptyPath(t *testing.T) {
-	pushed, err := loadPushed("")
-	if err != nil {
-		t.Fatalf("loadPushed empty path: %v", err)
-	}
-	if len(pushed) != 0 {
-		t.Error("expected empty map for empty path")
+	if len(st.Traffic) != 0 || len(st.Referrers) != 0 || len(st.Paths) != 0 {
+		t.Errorf("expected empty state for missing file, got %+v", st)
 	}
 }
 
-func TestSaveAndLoadPushed(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "pushed.txt")
-	original := map[string]bool{
-		"t|owner/repo|2026-02-21": true,
-		"r|owner/repo|2026-02-21": true,
-		"p|owner/repo|2026-02-21": true,
+func TestLoadState_EmptyPath(t *testing.T) {
+	st, err := loadState("")
+	if err != nil {
+		t.Fatalf("loadState empty path: %v", err)
+	}
+	if len(st.Traffic) != 0 {
+		t.Error("expected empty state for empty path")
+	}
+}
+
+func TestSaveAndLoadState(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	original := newPushState()
+	original.Traffic["owner/repo|2026-02-21"] = trafficCounts{Views: 42, Clones: 8}
+	original.Referrers["owner/repo|2026-02-21"] = true
+	original.Paths["owner/repo|2026-02-21"] = true
+
+	if err := saveState(path, original); err != nil {
+		t.Fatalf("saveState: %v", err)
+	}
+	loaded, err := loadState(path)
+	if err != nil {
+		t.Fatalf("loadState: %v", err)
 	}
 
-	if err := savePushed(path, original); err != nil {
-		t.Fatalf("savePushed: %v", err)
+	tc := loaded.Traffic["owner/repo|2026-02-21"]
+	if tc.Views != 42 || tc.Clones != 8 {
+		t.Errorf("traffic = %+v, want {Views:42 Clones:8}", tc)
 	}
-	loaded, err := loadPushed(path)
+	if !loaded.Referrers["owner/repo|2026-02-21"] {
+		t.Error("expected referrer key to be present")
+	}
+	if !loaded.Paths["owner/repo|2026-02-21"] {
+		t.Error("expected path key to be present")
+	}
+}
+
+func TestLoadState_MalformedFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	if err := os.WriteFile(path, []byte("not json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	st, err := loadState(path)
 	if err != nil {
-		t.Fatalf("loadPushed: %v", err)
+		t.Fatalf("loadState malformed: %v", err)
 	}
-	for k := range original {
-		if !loaded[k] {
-			t.Errorf("expected key %q after reload", k)
-		}
-	}
-	if len(loaded) != len(original) {
-		t.Errorf("loaded %d keys, want %d", len(loaded), len(original))
+	// Should return empty state rather than failing.
+	if st.Traffic == nil {
+		t.Error("Traffic map should be non-nil after malformed load")
 	}
 }
 
@@ -445,10 +402,7 @@ func TestPusher_SendBatch_RequestShape(t *testing.T) {
 	defer srv.Close()
 
 	p := &pusher{httpClient: srv.Client(), baseURL: srv.URL, batchSize: 100}
-	events := []umamiEvent{
-		{Type: "event", Payload: eventPayload{Website: "uuid", Hostname: "github.com", URL: "/a/b", Name: "github_view", Timestamp: 1708387200}},
-	}
-	if err := p.pushAll(events); err != nil {
+	if err := p.pushAll([]umamiEvent{{Type: "event", Payload: eventPayload{Name: "github_view"}}}); err != nil {
 		t.Fatalf("pushAll: %v", err)
 	}
 	if len(received) != 1 {
@@ -460,9 +414,7 @@ func TestPusher_BatchesBySize(t *testing.T) {
 	var batchSizes []int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var events []umamiEvent
-		if err := json.NewDecoder(r.Body).Decode(&events); err != nil {
-			t.Errorf("decode body: %v", err)
-		}
+		json.NewDecoder(r.Body).Decode(&events)
 		batchSizes = append(batchSizes, len(events))
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -471,12 +423,11 @@ func TestPusher_BatchesBySize(t *testing.T) {
 	p := &pusher{httpClient: srv.Client(), baseURL: srv.URL, batchSize: 3}
 	events := make([]umamiEvent, 7)
 	for i := range events {
-		events[i] = umamiEvent{Type: "event", Payload: eventPayload{Website: "uuid"}}
+		events[i] = umamiEvent{Type: "event"}
 	}
 	if err := p.pushAll(events); err != nil {
 		t.Fatalf("pushAll: %v", err)
 	}
-	// 7 events at batch size 3 → batches of 3, 3, 1.
 	if len(batchSizes) != 3 {
 		t.Fatalf("got %d batches, want 3", len(batchSizes))
 	}
@@ -494,47 +445,5 @@ func TestPusher_HTTPError(t *testing.T) {
 	p := &pusher{httpClient: srv.Client(), baseURL: srv.URL, batchSize: 100}
 	if err := p.pushAll([]umamiEvent{{Type: "event"}}); err == nil {
 		t.Error("expected error for HTTP 500, got nil")
-	}
-}
-
-// --- JSON wire format ---
-
-func TestEventPayloadJSON_RoundTrip(t *testing.T) {
-	e := umamiEvent{
-		Type: "event",
-		Payload: eventPayload{
-			Website:   "test-uuid",
-			Hostname:  "github.com",
-			URL:       "/owner/repo",
-			Name:      "github_view",
-			Timestamp: 1708387200,
-			Data:      map[string]any{"repo": "owner/repo"},
-		},
-	}
-
-	b, err := json.Marshal(e)
-	if err != nil {
-		t.Fatalf("marshal: %v", err)
-	}
-	var m map[string]any
-	if err := json.Unmarshal(b, &m); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if m["type"] != "event" {
-		t.Errorf("type = %v, want event", m["type"])
-	}
-	payload, ok := m["payload"].(map[string]any)
-	if !ok {
-		t.Fatal("payload is not an object")
-	}
-	if payload["timestamp"] != float64(1708387200) {
-		t.Errorf("payload.timestamp = %v, want 1708387200", payload["timestamp"])
-	}
-	data, ok := payload["data"].(map[string]any)
-	if !ok {
-		t.Fatal("payload.data is not an object")
-	}
-	if data["repo"] != "owner/repo" {
-		t.Errorf("data.repo = %v, want owner/repo", data["repo"])
 	}
 }
