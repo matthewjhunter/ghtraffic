@@ -47,5 +47,4 @@ jobs:
           fi
 
           echo "All checks passed, merging PR #$PR_NUMBER"
-          gh pr review --approve "$PR_NUMBER" -R "$REPO"
           gh pr merge --squash "$PR_NUMBER" -R "$REPO"
