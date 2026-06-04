@@ -7,3 +7,12 @@ linters:
     - staticcheck
     - unused
     - ineffassign
+
+formatters:
+  enable:
+    - gofmt
+run:
+  # CI hosts run several runners; golangci-lint's default single-instance lock
+  # trips ("parallel golangci-lint is running") when two lint jobs overlap on
+  # one host. Caches are per-runner-home, so parallel runs are safe.
+  allow-parallel-runners: true
