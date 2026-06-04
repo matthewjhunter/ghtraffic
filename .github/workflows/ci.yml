@@ -22,36 +22,8 @@ jobs:
       - name: Run tests
         run: go test -race -count=1 ./...
 
-  vet:
-    runs-on: [self-hosted, linux, ci]
-    steps:
-      - uses: actions/checkout@v6
-
-      - uses: actions/setup-go@v6
-        with:
-          go-version-file: go.mod
-
-      - name: Vet
-        run: go vet ./...
-
-  fmt:
-    runs-on: [self-hosted, linux, ci]
-    steps:
-      - uses: actions/checkout@v6
-
-      - uses: actions/setup-go@v6
-        with:
-          go-version-file: go.mod
-
-      - name: Check formatting
-        run: |
-          unformatted=$(gofmt -l .)
-          if [ -n "$unformatted" ]; then
-            echo "Files not formatted:"
-            echo "$unformatted"
-            exit 1
-          fi
-
+  # golangci-lint runs govet (default/enabled linter) and gofmt (formatter,
+  # enabled in .golangci.yml), so it subsumes the old standalone vet and fmt jobs.
   lint:
     runs-on: [self-hosted, linux, ci]
     steps:
