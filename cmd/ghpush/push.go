@@ -328,7 +328,10 @@ func buildEvents(records []Record, websiteID string, st pushState, now time.Time
 		prev := next.Traffic[key]
 
 		viewDelta := r.Views.Count - prev.Views
-		cloneDelta := r.Clones.Count - prev.Clones
+		// Use Uniques for clones: total clone count is dominated by CI
+		// (GitHub Actions, Dependabot) which inflates numbers ~10x. Unique
+		// cloners is a better proxy for actual human interest.
+		cloneDelta := r.Clones.Uniques - prev.Clones
 		if viewDelta <= 0 && cloneDelta <= 0 {
 			continue
 		}
@@ -359,7 +362,7 @@ func buildEvents(records []Record, websiteID string, st pushState, now time.Time
 
 		next.Traffic[key] = trafficCounts{
 			Views:  max(r.Views.Count, prev.Views),
-			Clones: max(r.Clones.Count, prev.Clones),
+			Clones: max(r.Clones.Uniques, prev.Clones),
 		}
 	}
 

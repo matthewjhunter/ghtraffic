@@ -73,7 +73,7 @@ func TestBuildEvents_FirstRun_FullCount(t *testing.T) {
 			Date:        "2026-02-15",
 			CollectedAt: "2026-02-21T09:00:00Z",
 			Views:       DayCounts{Count: 10},
-			Clones:      DayCounts{Count: 3},
+			Clones:      DayCounts{Count: 30, Uniques: 3},
 		},
 	}
 	now := time.Date(2026, 2, 21, 9, 0, 0, 0, time.UTC)
@@ -92,7 +92,7 @@ func TestBuildEvents_FirstRun_FullCount(t *testing.T) {
 		t.Errorf("views = %d, want 10 (full count on first run)", views)
 	}
 	if clones != 3 {
-		t.Errorf("clones = %d, want 3 (full count on first run)", clones)
+		t.Errorf("clones = %d, want 3 (uniques, not total count)", clones)
 	}
 	if newSt.Traffic["a/b|2026-02-15"].Views != 10 {
 		t.Errorf("state views = %d, want 10", newSt.Traffic["a/b|2026-02-15"].Views)
@@ -110,7 +110,7 @@ func TestBuildEvents_Delta(t *testing.T) {
 			Date:        "2026-02-21",
 			CollectedAt: "2026-02-21T10:00:00Z",
 			Views:       DayCounts{Count: 15},
-			Clones:      DayCounts{Count: 5},
+			Clones:      DayCounts{Count: 50, Uniques: 5},
 		},
 	}
 	now := time.Date(2026, 2, 21, 10, 0, 0, 0, time.UTC)
@@ -128,8 +128,8 @@ func TestBuildEvents_Delta(t *testing.T) {
 	if views != 5 { // 15 - 10
 		t.Errorf("views = %d, want 5 (delta)", views)
 	}
-	if clones != 2 { // 5 - 3
-		t.Errorf("clones = %d, want 2 (delta)", clones)
+	if clones != 2 { // 5 uniques - 3
+		t.Errorf("clones = %d, want 2 (uniques delta)", clones)
 	}
 	if newSt.Traffic["a/b|2026-02-21"].Views != 15 {
 		t.Errorf("state views = %d, want 15", newSt.Traffic["a/b|2026-02-21"].Views)
@@ -145,8 +145,8 @@ func TestBuildEvents_NoNewTraffic(t *testing.T) {
 			Repo:        "a/b",
 			Date:        "2026-02-21",
 			CollectedAt: "2026-02-21T10:00:00Z",
-			Views:       DayCounts{Count: 10}, // same as state
-			Clones:      DayCounts{Count: 3},
+			Views:       DayCounts{Count: 10},             // same as state
+			Clones:      DayCounts{Count: 30, Uniques: 3}, // uniques same as state
 		},
 	}
 	now := time.Date(2026, 2, 21, 10, 0, 0, 0, time.UTC)
