@@ -1,5 +1,6 @@
-ghtraffic
-ghpush
+# Built binaries at the repo root (anchored so they don't match cmd/ghpush/ etc.)
+/ghtraffic
+/ghpush
 *.jsonl
 dist/
 .idea/
