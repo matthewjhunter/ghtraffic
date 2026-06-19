@@ -1,0 +1,18 @@
+# Keep the build context small; the image rebuilds everything from source.
+.git
+.github
+.vscode
+.idea
+dist/
+*.jsonl
+*.db
+*.db-*
+# built binaries (image builds its own)
+/ghtraffic
+/ghpush
+/scheduler
+.task/
+.omc/
+*.swp
+*.swo
+.DS_Store
