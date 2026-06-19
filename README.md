@@ -78,12 +78,18 @@ reverse-proxy IP filtering that would otherwise drop server-originated events.
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `INTERVAL_SECONDS` | `3600` | Cycle period |
-| `GHTRAFFIC_OWNER` | (all) | Restrict collection to one owner/org |
+| `GHTRAFFIC_OWNERS` | (unset) | Comma-separated owners to collect, e.g. `matthewjhunter,infodancer` |
+| `GHTRAFFIC_TOKEN_<OWNER>` | | Per-owner PAT; `<OWNER>` is the owner uppercased with non-alphanumerics replaced by `_` (e.g. `old-school-gamers` -> `GHTRAFFIC_TOKEN_OLD_SCHOOL_GAMERS`) |
 | `DATA_FILE` | `/data/traffic.jsonl` | NDJSON history file (mount a volume here) |
 | `BIN_DIR` | `/` | Directory holding the `ghtraffic` and `ghpush` binaries |
 
-The container also reads the binaries' own env: `GITHUB_TOKEN`, `UMAMI_URL`,
-`UMAMI_WEBSITE_ID`, and `GHPUSH_DATABASE_URL` (Postgres push-state).
+Each cycle collects every listed owner with its own token (a fine-grained PAT
+is single-owner), then pushes once. One owner's failure is logged and does not
+stop the others or the push. If `GHTRAFFIC_OWNERS` is unset, the scheduler falls
+back to single-owner mode using `GHTRAFFIC_OWNER` + `GITHUB_TOKEN`.
+
+The container also reads ghpush's own env: `UMAMI_URL`, `UMAMI_WEBSITE_ID`, and
+`GHPUSH_DATABASE_URL` (Postgres push-state).
 
 ## Umami dashboard notes
 
