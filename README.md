@@ -31,19 +31,21 @@ endpoint with historical timestamps.
 Requires Umami v2.17 or later.
 
 ```
-ghpush [-pushed FILE] [-dry-run] [-init] [-import-json FILE]
+ghpush [-pushed FILE | -pg DSN] [-dry-run] [-init] [-import-json FILE] [-migrate-sqlite FILE]
 ```
 
 | Flag | Description |
 |------|-------------|
 | `-pushed FILE` | SQLite state file; tracks what has been pushed to avoid re-sending on re-run |
+| `-pg DSN` | Postgres DSN for the state store (alternative to `-pushed`; or set `GHPUSH_DATABASE_URL`) |
 | `-dry-run` | Print events as JSON to stdout without sending |
 | `-init` | Bootstrap from scratch: ignore push state and push all historical data |
-| `-import-json FILE` | Import a legacy JSON state file into the SQLite DB and exit |
+| `-import-json FILE` | Import a legacy JSON state file into the state store and exit |
+| `-migrate-sqlite FILE` | Copy an existing SQLite state file into the Postgres store (`-pg`) and exit |
 | `-url URL` | Umami base URL (overrides `UMAMI_URL`) |
 | `-website UUID` | Umami website UUID (overrides `UMAMI_WEBSITE_ID`) |
 
-**Environment variables:** `UMAMI_URL`, `UMAMI_WEBSITE_ID`
+**Environment variables:** `UMAMI_URL`, `UMAMI_WEBSITE_ID`, `GHPUSH_DATABASE_URL`
 
 ## Usage
 
@@ -63,6 +65,25 @@ ghpush -pushed ~/.local/share/ghtraffic/pushed.db \
 0  * * * * GITHUB_TOKEN=... ghtraffic -seen ~/traffic.jsonl >> ~/traffic.jsonl
 5  * * * * UMAMI_URL=https://umami.example.com UMAMI_WEBSITE_ID=... ghpush -pushed ~/pushed.db < ~/traffic.jsonl
 ```
+
+## Container deployment
+
+For a long-running deployment, the `scheduler` binary runs one collect+push cycle
+on start and then every `INTERVAL_SECONDS`, execing `ghtraffic` (appending to the
+data file) then `ghpush`. It is the entrypoint of the published image
+`ghcr.io/matthewjhunter/ghtraffic`, built `FROM gcr.io/distroless/static` (no shell,
+runs as non-root). Posting to Umami over an internal network address avoids any
+reverse-proxy IP filtering that would otherwise drop server-originated events.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `INTERVAL_SECONDS` | `3600` | Cycle period |
+| `GHTRAFFIC_OWNER` | (all) | Restrict collection to one owner/org |
+| `DATA_FILE` | `/data/traffic.jsonl` | NDJSON history file (mount a volume here) |
+| `BIN_DIR` | `/` | Directory holding the `ghtraffic` and `ghpush` binaries |
+
+The container also reads the binaries' own env: `GITHUB_TOKEN`, `UMAMI_URL`,
+`UMAMI_WEBSITE_ID`, and `GHPUSH_DATABASE_URL` (Postgres push-state).
 
 ## Umami dashboard notes
 
