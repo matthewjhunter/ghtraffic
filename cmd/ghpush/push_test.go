@@ -312,36 +312,53 @@ func TestPathEvents_URLIsPath(t *testing.T) {
 	}
 }
 
-// --- loadState / saveState ---
+// --- stateStore: load / save / reset ---
 
-func TestLoadState_NilDB(t *testing.T) {
-	st, err := loadState(nil)
+func newTestSQLiteStore(t *testing.T) *sqliteStore {
+	t.Helper()
+	s, err := newSQLiteStore(":memory:")
 	if err != nil {
-		t.Fatalf("loadState(nil): %v", err)
+		t.Fatalf("newSQLiteStore: %v", err)
+	}
+	t.Cleanup(func() { s.close() })
+	return s
+}
+
+func TestNopStore_LoadEmpty(t *testing.T) {
+	st, err := nopStore{}.load()
+	if err != nil {
+		t.Fatalf("nopStore.load: %v", err)
 	}
 	if len(st.Traffic) != 0 || len(st.Referrers) != 0 || len(st.Paths) != 0 {
-		t.Errorf("expected empty state for nil db, got %+v", st)
+		t.Errorf("expected empty state from nopStore, got %+v", st)
+	}
+}
+
+func TestNopStore_SaveResetNoop(t *testing.T) {
+	st := newPushState()
+	st.Traffic["a/b|2026-02-21"] = trafficCounts{Views: 1}
+	if err := (nopStore{}).save(st); err != nil {
+		t.Errorf("nopStore.save should be a no-op, got: %v", err)
+	}
+	if err := (nopStore{}).reset(); err != nil {
+		t.Errorf("nopStore.reset should be a no-op, got: %v", err)
 	}
 }
 
 func TestSaveAndLoadState(t *testing.T) {
-	db, err := openDB(":memory:")
-	if err != nil {
-		t.Fatalf("openDB: %v", err)
-	}
-	defer db.Close()
+	store := newTestSQLiteStore(t)
 
 	original := newPushState()
 	original.Traffic["owner/repo|2026-02-21"] = trafficCounts{Views: 42, Clones: 8}
 	original.Referrers["owner/repo|2026-02-21"] = true
 	original.Paths["owner/repo|2026-02-21"] = true
 
-	if err := saveState(db, original); err != nil {
-		t.Fatalf("saveState: %v", err)
+	if err := store.save(original); err != nil {
+		t.Fatalf("save: %v", err)
 	}
-	loaded, err := loadState(db)
+	loaded, err := store.load()
 	if err != nil {
-		t.Fatalf("loadState: %v", err)
+		t.Fatalf("load: %v", err)
 	}
 
 	tc := loaded.Traffic["owner/repo|2026-02-21"]
@@ -357,27 +374,23 @@ func TestSaveAndLoadState(t *testing.T) {
 }
 
 func TestSaveState_TrafficUpsert(t *testing.T) {
-	db, err := openDB(":memory:")
-	if err != nil {
-		t.Fatalf("openDB: %v", err)
-	}
-	defer db.Close()
+	store := newTestSQLiteStore(t)
 
 	st1 := newPushState()
 	st1.Traffic["a/b|2026-02-21"] = trafficCounts{Views: 10, Clones: 2}
-	if err := saveState(db, st1); err != nil {
-		t.Fatalf("saveState 1: %v", err)
+	if err := store.save(st1); err != nil {
+		t.Fatalf("save 1: %v", err)
 	}
 
 	st2 := newPushState()
 	st2.Traffic["a/b|2026-02-21"] = trafficCounts{Views: 15, Clones: 5}
-	if err := saveState(db, st2); err != nil {
-		t.Fatalf("saveState 2: %v", err)
+	if err := store.save(st2); err != nil {
+		t.Fatalf("save 2: %v", err)
 	}
 
-	loaded, err := loadState(db)
+	loaded, err := store.load()
 	if err != nil {
-		t.Fatalf("loadState: %v", err)
+		t.Fatalf("load: %v", err)
 	}
 	tc := loaded.Traffic["a/b|2026-02-21"]
 	if tc.Views != 15 || tc.Clones != 5 {
@@ -386,62 +399,48 @@ func TestSaveState_TrafficUpsert(t *testing.T) {
 }
 
 func TestSaveState_SnapshotIdempotent(t *testing.T) {
-	db, err := openDB(":memory:")
-	if err != nil {
-		t.Fatalf("openDB: %v", err)
-	}
-	defer db.Close()
+	store := newTestSQLiteStore(t)
 
 	st := newPushState()
 	st.Referrers["a/b|2026-02-21"] = true
 	st.Paths["a/b|2026-02-21"] = true
 
-	// Saving twice must not fail (INSERT OR IGNORE semantics).
-	if err := saveState(db, st); err != nil {
-		t.Fatalf("saveState 1: %v", err)
+	// Saving twice must not fail (insert-or-ignore semantics).
+	if err := store.save(st); err != nil {
+		t.Fatalf("save 1: %v", err)
 	}
-	if err := saveState(db, st); err != nil {
-		t.Fatalf("saveState 2 (duplicate): %v", err)
+	if err := store.save(st); err != nil {
+		t.Fatalf("save 2 (duplicate): %v", err)
 	}
 }
 
 func TestResetState_ClearsAllTables(t *testing.T) {
-	db, err := openDB(":memory:")
-	if err != nil {
-		t.Fatalf("openDB: %v", err)
-	}
-	defer db.Close()
+	store := newTestSQLiteStore(t)
 
 	st := newPushState()
 	st.Traffic["a/b|2026-02-21"] = trafficCounts{Views: 10, Clones: 2}
 	st.Referrers["a/b|2026-02-21"] = true
 	st.Paths["a/b|2026-02-21"] = true
-	if err := saveState(db, st); err != nil {
-		t.Fatalf("saveState: %v", err)
+	if err := store.save(st); err != nil {
+		t.Fatalf("save: %v", err)
 	}
 
-	if err := resetState(db); err != nil {
-		t.Fatalf("resetState: %v", err)
+	if err := store.reset(); err != nil {
+		t.Fatalf("reset: %v", err)
 	}
 
-	loaded, err := loadState(db)
+	loaded, err := store.load()
 	if err != nil {
-		t.Fatalf("loadState after reset: %v", err)
+		t.Fatalf("load after reset: %v", err)
 	}
 	if len(loaded.Traffic) != 0 || len(loaded.Referrers) != 0 || len(loaded.Paths) != 0 {
 		t.Errorf("expected empty state after reset, got %+v", loaded)
 	}
 }
 
-func TestResetState_NilDB(t *testing.T) {
-	if err := resetState(nil); err != nil {
-		t.Errorf("resetState(nil) should be a no-op, got: %v", err)
-	}
-}
+// --- importState / copyState ---
 
-// --- importJSONState ---
-
-func TestImportJSONState_RoundTrip(t *testing.T) {
+func TestImportState_RoundTrip(t *testing.T) {
 	// Write a legacy JSON state file.
 	path := t.TempDir() + "/state.json"
 	if err := os.WriteFile(path, []byte(`{
@@ -452,19 +451,14 @@ func TestImportJSONState_RoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	db, err := openDB(":memory:")
-	if err != nil {
-		t.Fatalf("openDB: %v", err)
-	}
-	defer db.Close()
-
-	if err := importJSONState(path, db); err != nil {
-		t.Fatalf("importJSONState: %v", err)
+	store := newTestSQLiteStore(t)
+	if err := importState(path, store); err != nil {
+		t.Fatalf("importState: %v", err)
 	}
 
-	loaded, err := loadState(db)
+	loaded, err := store.load()
 	if err != nil {
-		t.Fatalf("loadState: %v", err)
+		t.Fatalf("load: %v", err)
 	}
 	tc := loaded.Traffic["owner/repo|2026-02-15"]
 	if tc.Views != 42 || tc.Clones != 8 {
@@ -478,13 +472,34 @@ func TestImportJSONState_RoundTrip(t *testing.T) {
 	}
 }
 
-func TestImportJSONState_NilDB(t *testing.T) {
-	path := t.TempDir() + "/state.json"
-	if err := os.WriteFile(path, []byte(`{"traffic":{},"referrers":{},"paths":{}}`), 0o644); err != nil {
-		t.Fatal(err)
+func TestCopyState_BetweenStores(t *testing.T) {
+	// copyState is what the SQLite->Postgres migration relies on. Exercise it
+	// store-to-store (SQLite both ends) so the logic is covered without a
+	// live Postgres.
+	src := newTestSQLiteStore(t)
+	st := newPushState()
+	st.Traffic["a/b|2026-02-21"] = trafficCounts{Views: 7, Clones: 3}
+	st.Referrers["a/b|2026-02-21"] = true
+	st.Paths["a/b|2026-02-21"] = true
+	if err := src.save(st); err != nil {
+		t.Fatalf("seed source: %v", err)
 	}
-	if err := importJSONState(path, nil); err != nil {
-		t.Errorf("importJSONState(nil db) should be a no-op, got: %v", err)
+
+	dst := newTestSQLiteStore(t)
+	if err := copyState(src, dst); err != nil {
+		t.Fatalf("copyState: %v", err)
+	}
+
+	loaded, err := dst.load()
+	if err != nil {
+		t.Fatalf("load destination: %v", err)
+	}
+	tc := loaded.Traffic["a/b|2026-02-21"]
+	if tc.Views != 7 || tc.Clones != 3 {
+		t.Errorf("copied traffic = %+v, want {Views:7 Clones:3}", tc)
+	}
+	if !loaded.Referrers["a/b|2026-02-21"] || !loaded.Paths["a/b|2026-02-21"] {
+		t.Error("expected referrer and path snapshots to be copied")
 	}
 }
 
