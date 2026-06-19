@@ -50,15 +50,6 @@ func main() {
 		log.Fatal("use only one of -pushed (SQLite) or -pg (Postgres)")
 	}
 
-	if !*dryRun {
-		if *umamiURL == "" {
-			log.Fatal("no Umami URL: set UMAMI_URL or use -url")
-		}
-		if *websiteID == "" {
-			log.Fatal("no Umami website ID: set UMAMI_WEBSITE_ID or use -website")
-		}
-	}
-
 	store, err := openStore(*pgDSN, *pushedFile)
 	if err != nil {
 		log.Fatalf("open state store: %v", err)
@@ -71,7 +62,7 @@ func main() {
 		if *pgDSN == "" {
 			log.Fatal("-migrate-sqlite requires -pg (or GHPUSH_DATABASE_URL) as the destination")
 		}
-		src, err := newSQLiteStore(*migrateSQLite)
+		src, err := newSQLiteStoreReadOnly(*migrateSQLite)
 		if err != nil {
 			log.Fatalf("open source SQLite state: %v", err)
 		}
@@ -93,6 +84,17 @@ func main() {
 		}
 		log.Print("import complete")
 		return
+	}
+
+	// Past this point we actually push, which requires Umami config (unless
+	// -dry-run). The migrate/import paths above intentionally do not need it.
+	if !*dryRun {
+		if *umamiURL == "" {
+			log.Fatal("no Umami URL: set UMAMI_URL or use -url")
+		}
+		if *websiteID == "" {
+			log.Fatal("no Umami website ID: set UMAMI_WEBSITE_ID or use -website")
+		}
 	}
 
 	// -init: treat all records as new regardless of stored state.

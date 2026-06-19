@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -322,6 +323,46 @@ func newTestSQLiteStore(t *testing.T) *sqliteStore {
 	}
 	t.Cleanup(func() { s.close() })
 	return s
+}
+
+func TestNewSQLiteStoreReadOnly(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.db")
+
+	// Populate a normal store, then close it.
+	w, err := newSQLiteStore(path)
+	if err != nil {
+		t.Fatalf("newSQLiteStore: %v", err)
+	}
+	st := newPushState()
+	st.Traffic["a/b|2026-02-21"] = trafficCounts{Views: 7, Clones: 3}
+	st.Referrers["a/b|2026-02-21"] = true
+	if err := w.save(st); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	w.close() //nolint:errcheck
+
+	// Make the file read-only: the old code path failed here because it issued a
+	// WAL pragma (a write). The read-only opener must not write the source.
+	if err := os.Chmod(path, 0o400); err != nil {
+		t.Fatal(err)
+	}
+
+	ro, err := newSQLiteStoreReadOnly(path)
+	if err != nil {
+		t.Fatalf("read-only open failed: %v", err)
+	}
+	defer ro.close() //nolint:errcheck
+
+	got, err := ro.load()
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if tc := got.Traffic["a/b|2026-02-21"]; tc.Views != 7 || tc.Clones != 3 {
+		t.Errorf("traffic = %+v, want {Views:7 Clones:3}", tc)
+	}
+	if !got.Referrers["a/b|2026-02-21"] {
+		t.Error("expected referrer snapshot to load")
+	}
 }
 
 func TestNopStore_LoadEmpty(t *testing.T) {
