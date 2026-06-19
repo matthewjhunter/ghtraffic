@@ -99,6 +99,23 @@ func newSQLiteStore(path string) (*sqliteStore, error) {
 	return &sqliteStore{db: db}, nil
 }
 
+// newSQLiteStoreReadOnly opens the SQLite database at path read-only. Unlike
+// newSQLiteStore it sets no WAL pragma and creates no tables (both are writes),
+// so it works against a read-only file or bind mount. Only load() is meaningful;
+// save/reset will fail. Used as the source for -migrate-sqlite, which must not
+// mutate the file it copies from.
+func newSQLiteStoreReadOnly(path string) (*sqliteStore, error) {
+	db, err := sql.Open("sqlite", "file:"+path+"?mode=ro")
+	if err != nil {
+		return nil, fmt.Errorf("open: %w", err)
+	}
+	if err := db.Ping(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("open read-only: %w", err)
+	}
+	return &sqliteStore{db: db}, nil
+}
+
 func (s *sqliteStore) close() error { return s.db.Close() }
 
 func (s *sqliteStore) load() (pushState, error) {
