@@ -2,17 +2,14 @@ package main
 
 import (
 	"bytes"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"hash/fnv"
 	"io"
+	"maps"
 	"net/http"
-	"os"
 	"strings"
 	"time"
-
-	_ "modernc.org/sqlite"
 )
 
 // Umami's bot-detection blocks non-browser user-agents and silently returns
@@ -71,232 +68,6 @@ type eventPayload struct {
 	Data      map[string]any `json:"data,omitempty"`
 }
 
-// pushState is the in-memory representation of what has already been pushed.
-// It is loaded from and saved to a SQLite database.
-type pushState struct {
-	// Traffic maps "repo|date" to cumulative counts already pushed.
-	Traffic map[string]trafficCounts
-	// Referrers and Paths map "repo|collected-date" to a sent flag.
-	Referrers map[string]bool
-	Paths     map[string]bool
-}
-
-type trafficCounts struct {
-	Views  int
-	Clones int
-}
-
-func newPushState() pushState {
-	return pushState{
-		Traffic:   make(map[string]trafficCounts),
-		Referrers: make(map[string]bool),
-		Paths:     make(map[string]bool),
-	}
-}
-
-// openDB opens (or creates) the SQLite state database at path and initialises
-// the schema. Pass ":memory:" for an ephemeral in-process database (useful
-// in tests).
-func openDB(path string) (*sql.DB, error) {
-	db, err := sql.Open("sqlite", path)
-	if err != nil {
-		return nil, fmt.Errorf("open: %w", err)
-	}
-	if _, err := db.Exec(`PRAGMA journal_mode=WAL`); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("WAL pragma: %w", err)
-	}
-	_, err = db.Exec(`
-		CREATE TABLE IF NOT EXISTS traffic (
-			repo   TEXT NOT NULL,
-			date   TEXT NOT NULL,
-			views  INTEGER NOT NULL DEFAULT 0,
-			clones INTEGER NOT NULL DEFAULT 0,
-			PRIMARY KEY (repo, date)
-		);
-		CREATE TABLE IF NOT EXISTS snapshots (
-			repo           TEXT NOT NULL,
-			kind           TEXT NOT NULL,
-			collected_date TEXT NOT NULL,
-			PRIMARY KEY (repo, kind, collected_date)
-		);
-	`)
-	if err != nil {
-		db.Close()
-		return nil, fmt.Errorf("create tables: %w", err)
-	}
-	return db, nil
-}
-
-// loadState reads the full push state from the database into memory.
-// A nil db returns an empty state without error.
-func loadState(db *sql.DB) (pushState, error) {
-	st := newPushState()
-	if db == nil {
-		return st, nil
-	}
-
-	rows, err := db.Query(`SELECT repo, date, views, clones FROM traffic`)
-	if err != nil {
-		return st, fmt.Errorf("query traffic: %w", err)
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var repo, date string
-		var views, clones int
-		if err := rows.Scan(&repo, &date, &views, &clones); err != nil {
-			return st, err
-		}
-		st.Traffic[repo+"|"+date] = trafficCounts{Views: views, Clones: clones}
-	}
-	if err := rows.Err(); err != nil {
-		return st, err
-	}
-
-	rows2, err := db.Query(`SELECT repo, kind, collected_date FROM snapshots`)
-	if err != nil {
-		return st, fmt.Errorf("query snapshots: %w", err)
-	}
-	defer rows2.Close()
-	for rows2.Next() {
-		var repo, kind, date string
-		if err := rows2.Scan(&repo, &kind, &date); err != nil {
-			return st, err
-		}
-		key := repo + "|" + date
-		switch kind {
-		case "referrer":
-			st.Referrers[key] = true
-		case "path":
-			st.Paths[key] = true
-		}
-	}
-	return st, rows2.Err()
-}
-
-// saveState writes the push state to the database using upsert for traffic
-// counts and insert-or-ignore for snapshot flags. A nil db is a no-op.
-func saveState(db *sql.DB, st pushState) error {
-	if db == nil {
-		return nil
-	}
-	tx, err := db.Begin()
-	if err != nil {
-		return fmt.Errorf("begin: %w", err)
-	}
-	defer tx.Rollback() //nolint:errcheck
-
-	for key, tc := range st.Traffic {
-		repo, date, ok := splitKey(key)
-		if !ok {
-			continue
-		}
-		_, err := tx.Exec(`
-			INSERT INTO traffic (repo, date, views, clones) VALUES (?, ?, ?, ?)
-			ON CONFLICT (repo, date) DO UPDATE SET
-				views  = excluded.views,
-				clones = excluded.clones
-		`, repo, date, tc.Views, tc.Clones)
-		if err != nil {
-			return fmt.Errorf("upsert traffic %s: %w", key, err)
-		}
-	}
-
-	for key := range st.Referrers {
-		repo, date, ok := splitKey(key)
-		if !ok {
-			continue
-		}
-		if _, err := tx.Exec(
-			`INSERT OR IGNORE INTO snapshots (repo, kind, collected_date) VALUES (?, 'referrer', ?)`,
-			repo, date,
-		); err != nil {
-			return fmt.Errorf("insert referrer snapshot %s: %w", key, err)
-		}
-	}
-
-	for key := range st.Paths {
-		repo, date, ok := splitKey(key)
-		if !ok {
-			continue
-		}
-		if _, err := tx.Exec(
-			`INSERT OR IGNORE INTO snapshots (repo, kind, collected_date) VALUES (?, 'path', ?)`,
-			repo, date,
-		); err != nil {
-			return fmt.Errorf("insert path snapshot %s: %w", key, err)
-		}
-	}
-
-	return tx.Commit()
-}
-
-// jsonPushState mirrors the legacy JSON state file format used before the
-// SQLite migration. Field names match the original json tags exactly.
-type jsonPushState struct {
-	Traffic map[string]struct {
-		Views  int `json:"views"`
-		Clones int `json:"clones"`
-	} `json:"traffic"`
-	Referrers map[string]bool `json:"referrers"`
-	Paths     map[string]bool `json:"paths"`
-}
-
-// importJSONState reads a legacy JSON state file and merges its contents into
-// the database. Existing rows are updated via upsert; the import is idempotent.
-// A nil db is a no-op.
-func importJSONState(path string, db *sql.DB) error {
-	if db == nil {
-		return nil
-	}
-	f, err := os.Open(path)
-	if err != nil {
-		return fmt.Errorf("open: %w", err)
-	}
-	defer f.Close()
-
-	var js jsonPushState
-	if err := json.NewDecoder(f).Decode(&js); err != nil {
-		return fmt.Errorf("decode: %w", err)
-	}
-
-	st := newPushState()
-	for key, tc := range js.Traffic {
-		st.Traffic[key] = trafficCounts{Views: tc.Views, Clones: tc.Clones}
-	}
-	for key, v := range js.Referrers {
-		st.Referrers[key] = v
-	}
-	for key, v := range js.Paths {
-		st.Paths[key] = v
-	}
-	return saveState(db, st)
-}
-
-// resetState clears all persisted push state from the database. A nil db is a no-op.
-func resetState(db *sql.DB) error {
-	if db == nil {
-		return nil
-	}
-	tx, err := db.Begin()
-	if err != nil {
-		return fmt.Errorf("begin: %w", err)
-	}
-	defer tx.Rollback() //nolint:errcheck
-	if _, err := tx.Exec(`DELETE FROM traffic`); err != nil {
-		return fmt.Errorf("clear traffic: %w", err)
-	}
-	if _, err := tx.Exec(`DELETE FROM snapshots`); err != nil {
-		return fmt.Errorf("clear snapshots: %w", err)
-	}
-	return tx.Commit()
-}
-
-// splitKey splits a "repo|date" key. repo is "owner/repo" (never contains "|").
-func splitKey(key string) (repo, date string, ok bool) {
-	return strings.Cut(key, "|")
-}
-
 // buildEvents converts ghtraffic records into Umami events, emitting only the
 // delta since the last push for each repo+date. Returns the events to send and
 // an updated state to persist after a successful send.
@@ -304,15 +75,9 @@ func buildEvents(records []Record, websiteID string, st pushState, now time.Time
 	today := now.UTC().Format("2006-01-02")
 
 	next := newPushState()
-	for k, v := range st.Traffic {
-		next.Traffic[k] = v
-	}
-	for k, v := range st.Referrers {
-		next.Referrers[k] = v
-	}
-	for k, v := range st.Paths {
-		next.Paths[k] = v
-	}
+	maps.Copy(next.Traffic, st.Traffic)
+	maps.Copy(next.Referrers, st.Referrers)
+	maps.Copy(next.Paths, st.Paths)
 
 	latestByRepo := make(map[string]Record)
 	for _, r := range records {

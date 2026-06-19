@@ -1,25 +1,29 @@
 // ghpush reads ghtraffic NDJSON from stdin and pushes the records to Umami
-// as custom events, using the /api/batch endpoint with historical timestamps.
+// as custom events, using the /api/send endpoint with historical timestamps.
 //
-// Requires Umami v2.17 or later (adds /api/batch and timestamp support).
+// Requires Umami v2 or later.
 //
 // Usage:
 //
 //	ghtraffic -seen traffic.jsonl >> traffic.jsonl
-//	ghpush -pushed pushed.db < traffic.jsonl
+//	ghpush -pushed pushed.db < traffic.jsonl                  # SQLite state
+//	ghpush -pg "$GHPUSH_DATABASE_URL" < traffic.jsonl         # Postgres state
 //
 // Use -init to bootstrap a fresh Umami site from all stored historical data,
 // ignoring any prior push state and resetting it afterwards.
 //
+// Use -migrate-sqlite to copy an existing SQLite state file into the Postgres
+// store (target set via -pg / GHPUSH_DATABASE_URL) without re-pushing data.
+//
 // Environment variables:
 //
-//	UMAMI_URL        Base URL of your Umami instance (e.g. https://umami.example.com)
-//	UMAMI_WEBSITE_ID Website UUID from Umami settings
+//	UMAMI_URL           Base URL of your Umami instance (e.g. http://umami:3000)
+//	UMAMI_WEBSITE_ID    Website UUID from Umami settings
+//	GHPUSH_DATABASE_URL Postgres DSN/URL for the state store (alternative to -pg)
 package main
 
 import (
 	"bufio"
-	"database/sql"
 	"encoding/json"
 	"flag"
 	"log"
@@ -32,13 +36,19 @@ func main() {
 	log.SetOutput(os.Stderr)
 	log.SetFlags(0)
 
-	umamiURL := flag.String("url", envOrDefault("UMAMI_URL", ""), "Umami base URL (e.g. https://umami.example.com)")
+	umamiURL := flag.String("url", envOrDefault("UMAMI_URL", ""), "Umami base URL (e.g. http://umami:3000)")
 	websiteID := flag.String("website", envOrDefault("UMAMI_WEBSITE_ID", ""), "Umami website UUID")
 	pushedFile := flag.String("pushed", "", "SQLite state file tracking pushed counts (prevents re-pushing on re-run)")
+	pgDSN := flag.String("pg", envOrDefault("GHPUSH_DATABASE_URL", ""), "Postgres DSN/URL for the state store (alternative to -pushed)")
 	dryRun := flag.Bool("dry-run", false, "print events as JSON to stdout without sending")
 	init_ := flag.Bool("init", false, "bootstrap from scratch: ignore push state and push all historical data")
-	importJSON := flag.String("import-json", "", "import a legacy JSON state file into the SQLite DB and exit")
+	importJSON := flag.String("import-json", "", "import a legacy JSON state file into the state store and exit")
+	migrateSQLite := flag.String("migrate-sqlite", "", "copy an existing SQLite state file into the Postgres store and exit")
 	flag.Parse()
+
+	if *pushedFile != "" && *pgDSN != "" {
+		log.Fatal("use only one of -pushed (SQLite) or -pg (Postgres)")
+	}
 
 	if !*dryRun {
 		if *umamiURL == "" {
@@ -49,22 +59,36 @@ func main() {
 		}
 	}
 
-	var db *sql.DB
-	if *pushedFile != "" {
-		var err error
-		db, err = openDB(*pushedFile)
-		if err != nil {
-			log.Fatalf("open state db: %v", err)
+	store, err := openStore(*pgDSN, *pushedFile)
+	if err != nil {
+		log.Fatalf("open state store: %v", err)
+	}
+	defer store.close() //nolint:errcheck
+
+	// -migrate-sqlite: copy an existing SQLite state file into the configured
+	// store (intended to seed Postgres from the legacy workstation pushed.db).
+	if *migrateSQLite != "" {
+		if *pgDSN == "" {
+			log.Fatal("-migrate-sqlite requires -pg (or GHPUSH_DATABASE_URL) as the destination")
 		}
-		defer db.Close()
+		src, err := newSQLiteStore(*migrateSQLite)
+		if err != nil {
+			log.Fatalf("open source SQLite state: %v", err)
+		}
+		defer src.close() //nolint:errcheck
+		if err := copyState(src, store); err != nil {
+			log.Fatalf("migrate: %v", err)
+		}
+		log.Print("migrate complete")
+		return
 	}
 
-	// -import-json: migrate legacy JSON state into the SQLite DB and exit.
+	// -import-json: migrate legacy JSON state into the store and exit.
 	if *importJSON != "" {
-		if db == nil {
-			log.Fatal("-import-json requires -pushed to specify the SQLite database")
+		if _, ok := store.(nopStore); ok {
+			log.Fatal("-import-json requires -pushed or -pg to specify the state store")
 		}
-		if err := importJSONState(*importJSON, db); err != nil {
+		if err := importState(*importJSON, store); err != nil {
 			log.Fatalf("import: %v", err)
 		}
 		log.Print("import complete")
@@ -77,8 +101,7 @@ func main() {
 		st = newPushState()
 		log.Print("init mode: ignoring existing push state, all records will be sent")
 	} else {
-		var err error
-		st, err = loadState(db)
+		st, err = store.load()
 		if err != nil {
 			log.Fatalf("load state: %v", err)
 		}
@@ -130,17 +153,30 @@ func main() {
 
 	// On -init, clear stale state before writing the fresh baseline.
 	if *init_ {
-		if err := resetState(db); err != nil {
-			log.Printf("warning: could not reset state db: %v", err)
+		if err := store.reset(); err != nil {
+			log.Printf("warning: could not reset state store: %v", err)
 		}
 	}
 
-	if err := saveState(db, newSt); err != nil {
+	if err := store.save(newSt); err != nil {
 		// Non-fatal: push succeeded; warn so the user can investigate.
 		log.Printf("warning: could not save state, next run may re-push: %v", err)
 	}
 
 	log.Print("done")
+}
+
+// openStore selects the state backend: Postgres when a DSN is given, otherwise
+// SQLite when a file is given, otherwise a no-op store that persists nothing.
+func openStore(pgDSN, sqlitePath string) (stateStore, error) {
+	switch {
+	case pgDSN != "":
+		return newPGStore(pgDSN)
+	case sqlitePath != "":
+		return newSQLiteStore(sqlitePath)
+	default:
+		return nopStore{}, nil
+	}
 }
 
 func envOrDefault(key, def string) string {
