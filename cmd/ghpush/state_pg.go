@@ -58,7 +58,7 @@ func (s *pgStore) migrate() error {
 
 func (s *pgStore) close() error { return s.db.Close() }
 
-func (s *pgStore) load() (pushState, error) {
+func (s *pgStore) load() (pushState, error) { //nolint:dupl // mirrors sqliteStore.load/save; SQL dialect differs enough (placeholder syntax, upsert clause) that sharing an implementation needs a query-builder abstraction not worth it for two backends
 	st := newPushState()
 
 	rows, err := s.db.Query(`SELECT repo, date, views, clones FROM ghpush.traffic`)
@@ -104,7 +104,7 @@ func (s *pgStore) save(st pushState) error {
 	if err != nil {
 		return fmt.Errorf("begin: %w", err)
 	}
-	defer tx.Rollback() //nolint:errcheck
+	defer tx.Rollback() //nolint:errcheck // no-op if the tx already committed; nothing actionable if the rollback itself fails
 
 	for key, tc := range st.Traffic {
 		repo, date, ok := splitKey(key)
@@ -158,7 +158,7 @@ func (s *pgStore) reset() error {
 	if err != nil {
 		return fmt.Errorf("begin: %w", err)
 	}
-	defer tx.Rollback() //nolint:errcheck
+	defer tx.Rollback() //nolint:errcheck // no-op if the tx already committed; nothing actionable if the rollback itself fails
 	if _, err := tx.Exec(`DELETE FROM ghpush.traffic`); err != nil {
 		return fmt.Errorf("clear traffic: %w", err)
 	}

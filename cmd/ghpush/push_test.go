@@ -339,7 +339,7 @@ func TestNewSQLiteStoreReadOnly(t *testing.T) {
 	if err := w.save(st); err != nil {
 		t.Fatalf("save: %v", err)
 	}
-	w.close() //nolint:errcheck
+	w.close() //nolint:errcheck // best-effort cleanup on exit; nothing actionable to do with a close error here
 
 	// Make the file read-only: the old code path failed here because it issued a
 	// WAL pragma (a write). The read-only opener must not write the source.
@@ -351,7 +351,7 @@ func TestNewSQLiteStoreReadOnly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read-only open failed: %v", err)
 	}
-	defer ro.close() //nolint:errcheck
+	defer ro.close() //nolint:errcheck // best-effort cleanup on exit; nothing actionable to do with a close error here
 
 	got, err := ro.load()
 	if err != nil {

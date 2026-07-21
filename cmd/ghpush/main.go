@@ -54,7 +54,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("open state store: %v", err)
 	}
-	defer store.close() //nolint:errcheck
+	defer store.close() //nolint:errcheck // best-effort cleanup on exit; nothing actionable to do with a close error here
 
 	// -migrate-sqlite: copy an existing SQLite state file into the configured
 	// store (intended to seed Postgres from the legacy workstation pushed.db).
@@ -66,7 +66,7 @@ func main() {
 		if err != nil {
 			log.Fatalf("open source SQLite state: %v", err)
 		}
-		defer src.close() //nolint:errcheck
+		defer src.close() //nolint:errcheck // best-effort cleanup on exit; nothing actionable to do with a close error here
 		if err := copyState(src, store); err != nil {
 			log.Fatalf("migrate: %v", err)
 		}

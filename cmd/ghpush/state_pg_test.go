@@ -19,7 +19,7 @@ func TestPGStore_RoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newPGStore: %v", err)
 	}
-	defer store.close() //nolint:errcheck
+	defer store.close() //nolint:errcheck // best-effort cleanup on exit; nothing actionable to do with a close error here
 
 	// Start clean and clean up afterwards so a shared DB isn't polluted.
 	if err := store.reset(); err != nil {

@@ -118,7 +118,7 @@ func newSQLiteStoreReadOnly(path string) (*sqliteStore, error) {
 
 func (s *sqliteStore) close() error { return s.db.Close() }
 
-func (s *sqliteStore) load() (pushState, error) {
+func (s *sqliteStore) load() (pushState, error) { //nolint:dupl // mirrors pgStore.load/save; SQL dialect differs enough (placeholder syntax, upsert clause) that sharing an implementation needs a query-builder abstraction not worth it for two backends
 	st := newPushState()
 
 	rows, err := s.db.Query(`SELECT repo, date, views, clones FROM traffic`)
@@ -164,7 +164,7 @@ func (s *sqliteStore) save(st pushState) error {
 	if err != nil {
 		return fmt.Errorf("begin: %w", err)
 	}
-	defer tx.Rollback() //nolint:errcheck
+	defer tx.Rollback() //nolint:errcheck // no-op if the tx already committed; nothing actionable if the rollback itself fails
 
 	for key, tc := range st.Traffic {
 		repo, date, ok := splitKey(key)
@@ -216,7 +216,7 @@ func (s *sqliteStore) reset() error {
 	if err != nil {
 		return fmt.Errorf("begin: %w", err)
 	}
-	defer tx.Rollback() //nolint:errcheck
+	defer tx.Rollback() //nolint:errcheck // no-op if the tx already committed; nothing actionable if the rollback itself fails
 	if _, err := tx.Exec(`DELETE FROM traffic`); err != nil {
 		return fmt.Errorf("clear traffic: %w", err)
 	}
