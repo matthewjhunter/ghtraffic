@@ -244,7 +244,7 @@ func TestBuildEvents_ReferrersFromLatestRecord(t *testing.T) {
 
 func TestBuildEvents_SkipsPushedReferrers(t *testing.T) {
 	st := newPushState()
-	st.Referrers["a/b|2026-02-21"] = true
+	st.Referrers["a/b|google.com"] = 5
 
 	r := Record{
 		Repo: "a/b", Date: "2026-02-21", CollectedAt: "2026-02-21T00:00:00Z",
@@ -258,6 +258,139 @@ func TestBuildEvents_SkipsPushedReferrers(t *testing.T) {
 			t.Error("expected no referrer events when already in state")
 		}
 	}
+}
+
+// GitHub's popular/referrers is a running 14-day total. Re-sending the same
+// cumulative payload the next day inflated Umami's referrer breakdown ~14x.
+func TestBuildEvents_ReferrerDeltaAcrossDays(t *testing.T) {
+	r := Record{
+		Repo: "a/b", Date: "2026-02-21", CollectedAt: "2026-02-21T09:00:00Z",
+		Referrers: []Referrer{{Name: "google.com", Count: 5, Uniques: 3}},
+	}
+	now := time.Date(2026, 2, 21, 9, 0, 0, 0, time.UTC)
+	events, st := buildEvents([]Record{r}, "uuid", newPushState(), now)
+	if got := countReferrerEvents(events); got != 5 {
+		t.Fatalf("first run referrer events = %d, want 5", got)
+	}
+	if st.Referrers["a/b|google.com"] != 5 {
+		t.Fatalf("state = %d, want 5", st.Referrers["a/b|google.com"])
+	}
+
+	// Next day, same 14-day total and a later CollectedAt: nothing new.
+	r.Date = "2026-02-22"
+	r.CollectedAt = "2026-02-22T09:00:00Z"
+	next := time.Date(2026, 2, 22, 9, 0, 0, 0, time.UTC)
+	events, st = buildEvents([]Record{r}, "uuid", st, next)
+	if got := countReferrerEvents(events); got != 0 {
+		t.Errorf("unchanged 14-day total produced %d referrer events, want 0", got)
+	}
+
+	// Two more hits inside the window: only the delta is sent.
+	r.Referrers = []Referrer{{Name: "google.com", Count: 7, Uniques: 4}}
+	events, st = buildEvents([]Record{r}, "uuid", st, next)
+	if got := countReferrerEvents(events); got != 2 {
+		t.Errorf("referrer events = %d, want 2 (7 - 5)", got)
+	}
+	if st.Referrers["a/b|google.com"] != 7 {
+		t.Errorf("state = %d, want 7", st.Referrers["a/b|google.com"])
+	}
+}
+
+// The 14-day window rolls off, so a cumulative count can fall. Clamp the delta
+// at zero and keep the stored count monotonic rather than re-sending later.
+func TestBuildEvents_ReferrerRollOffDoesNotResend(t *testing.T) {
+	st := newPushState()
+	st.Referrers["a/b|google.com"] = 10
+
+	r := Record{
+		Repo: "a/b", Date: "2026-02-21", CollectedAt: "2026-02-21T09:00:00Z",
+		Referrers: []Referrer{{Name: "google.com", Count: 4, Uniques: 2}},
+	}
+	now := time.Date(2026, 2, 21, 9, 0, 0, 0, time.UTC)
+	events, newSt := buildEvents([]Record{r}, "uuid", st, now)
+	if got := countReferrerEvents(events); got != 0 {
+		t.Errorf("roll-off produced %d referrer events, want 0", got)
+	}
+	if newSt.Referrers["a/b|google.com"] != 10 {
+		t.Errorf("state = %d, want 10 (monotonic)", newSt.Referrers["a/b|google.com"])
+	}
+}
+
+func TestBuildEvents_PathDeltaAcrossDays(t *testing.T) {
+	r := Record{
+		Repo: "a/b", Date: "2026-02-21", CollectedAt: "2026-02-21T09:00:00Z",
+		Paths: []Path{{Path: "/a/b/pulls", Title: "Pulls", Count: 3, Uniques: 2}},
+	}
+	now := time.Date(2026, 2, 21, 9, 0, 0, 0, time.UTC)
+	events, st := buildEvents([]Record{r}, "uuid", newPushState(), now)
+	if got := countPathEvents(events, "/a/b/pulls"); got != 3 {
+		t.Fatalf("first run path events = %d, want 3", got)
+	}
+
+	// Next day, unchanged 14-day total: no repeat.
+	r.Date = "2026-02-22"
+	r.CollectedAt = "2026-02-22T09:00:00Z"
+	next := time.Date(2026, 2, 22, 9, 0, 0, 0, time.UTC)
+	events, st = buildEvents([]Record{r}, "uuid", st, next)
+	if got := countPathEvents(events, "/a/b/pulls"); got != 0 {
+		t.Errorf("unchanged 14-day total produced %d path events, want 0", got)
+	}
+
+	// One new hit, plus a path that has not been seen before.
+	r.Paths = []Path{
+		{Path: "/a/b/pulls", Title: "Pulls", Count: 4, Uniques: 2},
+		{Path: "/a/b/issues", Title: "Issues", Count: 2, Uniques: 1},
+	}
+	events, st = buildEvents([]Record{r}, "uuid", st, next)
+	if got := countPathEvents(events, "/a/b/pulls"); got != 1 {
+		t.Errorf("/a/b/pulls events = %d, want 1 (4 - 3)", got)
+	}
+	if got := countPathEvents(events, "/a/b/issues"); got != 2 {
+		t.Errorf("/a/b/issues events = %d, want 2 (first sighting)", got)
+	}
+	if st.Paths["a/b|/a/b/pulls"] != 4 || st.Paths["a/b|/a/b/issues"] != 2 {
+		t.Errorf("path state = %v, want pulls:4 issues:2", st.Paths)
+	}
+}
+
+// Paths are tracked per path, not per repo: a repo's counts must not collide
+// with another repo's, and state keys stay splittable at the first "|".
+func TestBuildEvents_PathStateIsPerRepoAndPath(t *testing.T) {
+	records := []Record{
+		{Repo: "a/b", Date: "2026-02-21", CollectedAt: "2026-02-21T09:00:00Z",
+			Paths: []Path{{Path: "/shared", Count: 3}}},
+		{Repo: "c/d", Date: "2026-02-21", CollectedAt: "2026-02-21T09:00:00Z",
+			Paths: []Path{{Path: "/shared", Count: 5}}},
+	}
+	now := time.Date(2026, 2, 21, 9, 0, 0, 0, time.UTC)
+	events, st := buildEvents(records, "uuid", newPushState(), now)
+
+	if got := countPathEvents(events, "/shared"); got != 8 {
+		t.Errorf("path events = %d, want 8 (3 + 5 from distinct repos)", got)
+	}
+	if st.Paths["a/b|/shared"] != 3 || st.Paths["c/d|/shared"] != 5 {
+		t.Errorf("path state = %v, want a/b:3 c/d:5", st.Paths)
+	}
+}
+
+func countReferrerEvents(events []umamiEvent) int {
+	var n int
+	for _, e := range events {
+		if e.Payload.Referrer != "" {
+			n++
+		}
+	}
+	return n
+}
+
+func countPathEvents(events []umamiEvent, path string) int {
+	var n int
+	for _, e := range events {
+		if e.Payload.Referrer == "" && e.Payload.URL == path {
+			n++
+		}
+	}
+	return n
 }
 
 // --- referrerEvents ---
@@ -335,7 +468,7 @@ func TestNewSQLiteStoreReadOnly(t *testing.T) {
 	}
 	st := newPushState()
 	st.Traffic["a/b|2026-02-21"] = trafficCounts{Views: 7, Clones: 3}
-	st.Referrers["a/b|2026-02-21"] = true
+	st.Referrers["a/b|google.com"] = 4
 	if err := w.save(st); err != nil {
 		t.Fatalf("save: %v", err)
 	}
@@ -360,8 +493,8 @@ func TestNewSQLiteStoreReadOnly(t *testing.T) {
 	if tc := got.Traffic["a/b|2026-02-21"]; tc.Views != 7 || tc.Clones != 3 {
 		t.Errorf("traffic = %+v, want {Views:7 Clones:3}", tc)
 	}
-	if !got.Referrers["a/b|2026-02-21"] {
-		t.Error("expected referrer snapshot to load")
+	if got.Referrers["a/b|google.com"] != 4 {
+		t.Errorf("referrer count = %d, want 4", got.Referrers["a/b|google.com"])
 	}
 }
 
@@ -391,8 +524,8 @@ func TestSaveAndLoadState(t *testing.T) {
 
 	original := newPushState()
 	original.Traffic["owner/repo|2026-02-21"] = trafficCounts{Views: 42, Clones: 8}
-	original.Referrers["owner/repo|2026-02-21"] = true
-	original.Paths["owner/repo|2026-02-21"] = true
+	original.Referrers["owner/repo|google.com"] = 6
+	original.Paths["owner/repo|/owner/repo/pulls"] = 9
 
 	if err := store.save(original); err != nil {
 		t.Fatalf("save: %v", err)
@@ -406,11 +539,11 @@ func TestSaveAndLoadState(t *testing.T) {
 	if tc.Views != 42 || tc.Clones != 8 {
 		t.Errorf("traffic = %+v, want {Views:42 Clones:8}", tc)
 	}
-	if !loaded.Referrers["owner/repo|2026-02-21"] {
-		t.Error("expected referrer key to be present")
+	if loaded.Referrers["owner/repo|google.com"] != 6 {
+		t.Errorf("referrer count = %d, want 6", loaded.Referrers["owner/repo|google.com"])
 	}
-	if !loaded.Paths["owner/repo|2026-02-21"] {
-		t.Error("expected path key to be present")
+	if loaded.Paths["owner/repo|/owner/repo/pulls"] != 9 {
+		t.Errorf("path count = %d, want 9", loaded.Paths["owner/repo|/owner/repo/pulls"])
 	}
 }
 
@@ -439,19 +572,33 @@ func TestSaveState_TrafficUpsert(t *testing.T) {
 	}
 }
 
-func TestSaveState_SnapshotIdempotent(t *testing.T) {
+func TestSaveState_SnapshotUpsert(t *testing.T) {
 	store := newTestSQLiteStore(t)
 
 	st := newPushState()
-	st.Referrers["a/b|2026-02-21"] = true
-	st.Paths["a/b|2026-02-21"] = true
-
-	// Saving twice must not fail (insert-or-ignore semantics).
+	st.Referrers["a/b|google.com"] = 2
+	st.Paths["a/b|/a/b/pulls"] = 3
 	if err := store.save(st); err != nil {
 		t.Fatalf("save 1: %v", err)
 	}
+
+	// Re-saving the same keys with higher counts must overwrite, not fail or
+	// keep the old value: the stored count is the push high-water mark.
+	st.Referrers["a/b|google.com"] = 5
+	st.Paths["a/b|/a/b/pulls"] = 8
 	if err := store.save(st); err != nil {
-		t.Fatalf("save 2 (duplicate): %v", err)
+		t.Fatalf("save 2: %v", err)
+	}
+
+	loaded, err := store.load()
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if loaded.Referrers["a/b|google.com"] != 5 {
+		t.Errorf("referrer count = %d, want 5", loaded.Referrers["a/b|google.com"])
+	}
+	if loaded.Paths["a/b|/a/b/pulls"] != 8 {
+		t.Errorf("path count = %d, want 8", loaded.Paths["a/b|/a/b/pulls"])
 	}
 }
 
@@ -460,8 +607,8 @@ func TestResetState_ClearsAllTables(t *testing.T) {
 
 	st := newPushState()
 	st.Traffic["a/b|2026-02-21"] = trafficCounts{Views: 10, Clones: 2}
-	st.Referrers["a/b|2026-02-21"] = true
-	st.Paths["a/b|2026-02-21"] = true
+	st.Referrers["a/b|google.com"] = 2
+	st.Paths["a/b|/a/b/pulls"] = 3
 	if err := store.save(st); err != nil {
 		t.Fatalf("save: %v", err)
 	}
@@ -505,11 +652,11 @@ func TestImportState_RoundTrip(t *testing.T) {
 	if tc.Views != 42 || tc.Clones != 8 {
 		t.Errorf("traffic = %+v, want {Views:42 Clones:8}", tc)
 	}
-	if !loaded.Referrers["owner/repo|2026-02-15"] {
-		t.Error("expected referrer key")
-	}
-	if !loaded.Paths["owner/repo|2026-02-15"] {
-		t.Error("expected path key")
+	// The legacy file's referrer/path entries were per-day sent flags with no
+	// count behind them, so they are dropped rather than imported as counts.
+	if len(loaded.Referrers) != 0 || len(loaded.Paths) != 0 {
+		t.Errorf("expected no snapshot counts from legacy import, got referrers=%v paths=%v",
+			loaded.Referrers, loaded.Paths)
 	}
 }
 
@@ -520,8 +667,8 @@ func TestCopyState_BetweenStores(t *testing.T) {
 	src := newTestSQLiteStore(t)
 	st := newPushState()
 	st.Traffic["a/b|2026-02-21"] = trafficCounts{Views: 7, Clones: 3}
-	st.Referrers["a/b|2026-02-21"] = true
-	st.Paths["a/b|2026-02-21"] = true
+	st.Referrers["a/b|google.com"] = 4
+	st.Paths["a/b|/a/b/pulls"] = 6
 	if err := src.save(st); err != nil {
 		t.Fatalf("seed source: %v", err)
 	}
@@ -539,8 +686,9 @@ func TestCopyState_BetweenStores(t *testing.T) {
 	if tc.Views != 7 || tc.Clones != 3 {
 		t.Errorf("copied traffic = %+v, want {Views:7 Clones:3}", tc)
 	}
-	if !loaded.Referrers["a/b|2026-02-21"] || !loaded.Paths["a/b|2026-02-21"] {
-		t.Error("expected referrer and path snapshots to be copied")
+	if loaded.Referrers["a/b|google.com"] != 4 || loaded.Paths["a/b|/a/b/pulls"] != 6 {
+		t.Errorf("copied snapshots = referrers:%v paths:%v, want google.com:4 /a/b/pulls:6",
+			loaded.Referrers, loaded.Paths)
 	}
 }
 

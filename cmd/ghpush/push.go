@@ -69,8 +69,10 @@ type eventPayload struct {
 }
 
 // buildEvents converts ghtraffic records into Umami events, emitting only the
-// delta since the last push for each repo+date. Returns the events to send and
-// an updated state to persist after a successful send.
+// delta since the last push: views and clones per repo+date, popular paths and
+// referrers per repo+item. All four GitHub sources report cumulative counts, so
+// state holds the last count seen and only the growth is sent. Returns the
+// events to send and an updated state to persist after a successful send.
 func buildEvents(records []Record, websiteID string, st pushState, now time.Time) ([]umamiEvent, pushState) {
 	today := now.UTC().Format("2006-01-02")
 
@@ -136,18 +138,36 @@ func buildEvents(records []Record, websiteID string, st pushState, now time.Time
 		if err != nil {
 			collectedAt = now
 		}
-		collectedDate := collectedAt.UTC().Format("2006-01-02")
 
-		refKey := repo + "|" + collectedDate
-		if !next.Referrers[refKey] && len(r.Referrers) > 0 {
-			events = append(events, referrerEvents(repo, r.Referrers, collectedAt, websiteID)...)
-			next.Referrers[refKey] = true
+		// Popular paths and referrers are running 14-day totals, not daily
+		// figures, so only the growth since the last push is new traffic.
+		var newRefs []Referrer
+		for _, ref := range r.Referrers {
+			key := repo + "|" + ref.Name
+			prev := next.Referrers[key]
+			if delta := ref.Count - prev; delta > 0 {
+				newRefs = append(newRefs, Referrer{Name: ref.Name, Count: delta, Uniques: ref.Uniques})
+			}
+			// Keep the stored count monotonic: the 14-day window rolls off, so
+			// a cumulative count can legitimately fall. Clamping there costs a
+			// slight undercount, which beats re-posting the whole window.
+			next.Referrers[key] = max(ref.Count, prev)
+		}
+		if len(newRefs) > 0 {
+			events = append(events, referrerEvents(repo, newRefs, collectedAt, websiteID)...)
 		}
 
-		pathKey := repo + "|" + collectedDate
-		if !next.Paths[pathKey] && len(r.Paths) > 0 {
-			events = append(events, pathEvents(repo, r.Paths, collectedAt, websiteID)...)
-			next.Paths[pathKey] = true
+		var newPaths []Path
+		for _, p := range r.Paths {
+			key := repo + "|" + p.Path
+			prev := next.Paths[key]
+			if delta := p.Count - prev; delta > 0 {
+				newPaths = append(newPaths, Path{Path: p.Path, Title: p.Title, Count: delta, Uniques: p.Uniques})
+			}
+			next.Paths[key] = max(p.Count, prev)
+		}
+		if len(newPaths) > 0 {
+			events = append(events, pathEvents(repo, newPaths, collectedAt, websiteID)...)
 		}
 	}
 

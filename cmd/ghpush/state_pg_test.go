@@ -29,15 +29,17 @@ func TestPGStore_RoundTrip(t *testing.T) {
 
 	st := newPushState()
 	st.Traffic["a/b|2026-02-21"] = trafficCounts{Views: 11, Clones: 4}
-	st.Referrers["a/b|2026-02-21"] = true
-	st.Paths["a/b|2026-02-21"] = true
+	st.Referrers["a/b|google.com"] = 3
+	st.Paths["a/b|/a/b/pulls"] = 5
 	if err := store.save(st); err != nil {
 		t.Fatalf("save: %v", err)
 	}
 
-	// Re-save with higher counts: traffic upserts, snapshots ON CONFLICT DO
-	// NOTHING. Must not error and must reflect the new counts.
+	// Re-save with higher counts: both tables upsert. Must not error and must
+	// reflect the new counts.
 	st.Traffic["a/b|2026-02-21"] = trafficCounts{Views: 20, Clones: 6}
+	st.Referrers["a/b|google.com"] = 9
+	st.Paths["a/b|/a/b/pulls"] = 12
 	if err := store.save(st); err != nil {
 		t.Fatalf("save 2 (upsert): %v", err)
 	}
@@ -50,8 +52,9 @@ func TestPGStore_RoundTrip(t *testing.T) {
 	if tc.Views != 20 || tc.Clones != 6 {
 		t.Errorf("traffic = %+v, want {Views:20 Clones:6}", tc)
 	}
-	if !loaded.Referrers["a/b|2026-02-21"] || !loaded.Paths["a/b|2026-02-21"] {
-		t.Error("expected referrer and path snapshots present")
+	if loaded.Referrers["a/b|google.com"] != 9 || loaded.Paths["a/b|/a/b/pulls"] != 12 {
+		t.Errorf("snapshots = referrers:%v paths:%v, want google.com:9 /a/b/pulls:12",
+			loaded.Referrers, loaded.Paths)
 	}
 
 	if err := store.reset(); err != nil {
