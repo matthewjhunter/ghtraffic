@@ -4,7 +4,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"maps"
 	"os"
 	"strings"
 
@@ -15,9 +14,11 @@ import (
 type pushState struct {
 	// Traffic maps "repo|date" to cumulative counts already pushed.
 	Traffic map[string]trafficCounts
-	// Referrers and Paths map "repo|collected-date" to a sent flag.
-	Referrers map[string]bool
-	Paths     map[string]bool
+	// Referrers maps "repo|referrer" and Paths maps "repo|path" to the
+	// cumulative hit count already pushed. GitHub reports both as running
+	// 14-day totals, so only the growth since the last push is new traffic.
+	Referrers map[string]int
+	Paths     map[string]int
 }
 
 type trafficCounts struct {
@@ -28,8 +29,8 @@ type trafficCounts struct {
 func newPushState() pushState {
 	return pushState{
 		Traffic:   make(map[string]trafficCounts),
-		Referrers: make(map[string]bool),
-		Paths:     make(map[string]bool),
+		Referrers: make(map[string]int),
+		Paths:     make(map[string]int),
 	}
 }
 
@@ -42,8 +43,8 @@ type stateStore interface {
 	// load reads the full push state into memory. An empty store returns an
 	// empty (non-nil) state.
 	load() (pushState, error)
-	// save persists the push state. Traffic counts are upserted; snapshot
-	// flags are inserted-or-ignored, so save is idempotent.
+	// save persists the push state. Traffic and snapshot counts are both
+	// upserted, so save is idempotent.
 	save(st pushState) error
 	// reset clears all persisted state.
 	reset() error
@@ -85,12 +86,16 @@ func newSQLiteStore(path string) (*sqliteStore, error) {
 			clones INTEGER NOT NULL DEFAULT 0,
 			PRIMARY KEY (repo, date)
 		);
-		CREATE TABLE IF NOT EXISTS snapshots (
-			repo           TEXT NOT NULL,
-			kind           TEXT NOT NULL,
-			collected_date TEXT NOT NULL,
-			PRIMARY KEY (repo, kind, collected_date)
+		CREATE TABLE IF NOT EXISTS snapshot_counts (
+			repo  TEXT NOT NULL,
+			kind  TEXT NOT NULL,
+			item  TEXT NOT NULL,
+			count INTEGER NOT NULL DEFAULT 0,
+			PRIMARY KEY (repo, kind, item)
 		);
+		-- Legacy per-day "already sent" flags, replaced by snapshot_counts.
+		-- Their date-keyed rows carry no count, so there is nothing to migrate.
+		DROP TABLE IF EXISTS snapshots;
 	`)
 	if err != nil {
 		db.Close()
@@ -138,22 +143,23 @@ func (s *sqliteStore) load() (pushState, error) { //nolint:dupl // mirrors pgSto
 		return st, err
 	}
 
-	rows2, err := s.db.Query(`SELECT repo, kind, collected_date FROM snapshots`)
+	rows2, err := s.db.Query(`SELECT repo, kind, item, count FROM snapshot_counts`)
 	if err != nil {
-		return st, fmt.Errorf("query snapshots: %w", err)
+		return st, fmt.Errorf("query snapshot counts: %w", err)
 	}
 	defer rows2.Close()
 	for rows2.Next() {
-		var repo, kind, date string
-		if err := rows2.Scan(&repo, &kind, &date); err != nil {
+		var repo, kind, item string
+		var count int
+		if err := rows2.Scan(&repo, &kind, &item, &count); err != nil {
 			return st, err
 		}
-		key := repo + "|" + date
+		key := repo + "|" + item
 		switch kind {
 		case "referrer":
-			st.Referrers[key] = true
+			st.Referrers[key] = count
 		case "path":
-			st.Paths[key] = true
+			st.Paths[key] = count
 		}
 	}
 	return st, rows2.Err()
@@ -182,33 +188,38 @@ func (s *sqliteStore) save(st pushState) error {
 		}
 	}
 
-	for key := range st.Referrers {
-		repo, date, ok := splitKey(key)
-		if !ok {
-			continue
-		}
-		if _, err := tx.Exec(
-			`INSERT OR IGNORE INTO snapshots (repo, kind, collected_date) VALUES (?, 'referrer', ?)`,
-			repo, date,
-		); err != nil {
-			return fmt.Errorf("insert referrer snapshot %s: %w", key, err)
-		}
-	}
-
-	for key := range st.Paths {
-		repo, date, ok := splitKey(key)
-		if !ok {
-			continue
-		}
-		if _, err := tx.Exec(
-			`INSERT OR IGNORE INTO snapshots (repo, kind, collected_date) VALUES (?, 'path', ?)`,
-			repo, date,
-		); err != nil {
-			return fmt.Errorf("insert path snapshot %s: %w", key, err)
+	for _, s := range snapshotKinds(st) {
+		for key, count := range s.counts {
+			repo, item, ok := splitKey(key)
+			if !ok {
+				continue
+			}
+			_, err := tx.Exec(`
+				INSERT INTO snapshot_counts (repo, kind, item, count) VALUES (?, ?, ?, ?)
+				ON CONFLICT (repo, kind, item) DO UPDATE SET count = excluded.count
+			`, repo, s.kind, item, count)
+			if err != nil {
+				return fmt.Errorf("upsert %s snapshot %s: %w", s.kind, key, err)
+			}
 		}
 	}
 
 	return tx.Commit()
+}
+
+// snapshotKind pairs a snapshot map with the kind column value the stores
+// persist it under.
+type snapshotKind struct {
+	kind   string
+	counts map[string]int
+}
+
+// snapshotKinds lists st's snapshot maps so both backends write them in one loop.
+func snapshotKinds(st pushState) []snapshotKind {
+	return []snapshotKind{
+		{"referrer", st.Referrers},
+		{"path", st.Paths},
+	}
 }
 
 func (s *sqliteStore) reset() error {
@@ -220,21 +231,21 @@ func (s *sqliteStore) reset() error {
 	if _, err := tx.Exec(`DELETE FROM traffic`); err != nil {
 		return fmt.Errorf("clear traffic: %w", err)
 	}
-	if _, err := tx.Exec(`DELETE FROM snapshots`); err != nil {
-		return fmt.Errorf("clear snapshots: %w", err)
+	if _, err := tx.Exec(`DELETE FROM snapshot_counts`); err != nil {
+		return fmt.Errorf("clear snapshot counts: %w", err)
 	}
 	return tx.Commit()
 }
 
 // jsonPushState mirrors the legacy JSON state file format used before the
-// SQLite migration. Field names match the original json tags exactly.
+// SQLite migration. Field names match the original json tags exactly. Its
+// referrer and path entries were per-day "already sent" flags keyed by
+// collected date, carrying no count, so they are decoded but not imported.
 type jsonPushState struct {
 	Traffic map[string]struct {
 		Views  int `json:"views"`
 		Clones int `json:"clones"`
 	} `json:"traffic"`
-	Referrers map[string]bool `json:"referrers"`
-	Paths     map[string]bool `json:"paths"`
 }
 
 // importState reads a legacy JSON state file and merges its contents into the
@@ -256,8 +267,6 @@ func importState(path string, store stateStore) error {
 	for key, tc := range js.Traffic {
 		st.Traffic[key] = trafficCounts{Views: tc.Views, Clones: tc.Clones}
 	}
-	maps.Copy(st.Referrers, js.Referrers)
-	maps.Copy(st.Paths, js.Paths)
 	return store.save(st)
 }
 
@@ -275,7 +284,9 @@ func copyState(src, dst stateStore) error {
 	return nil
 }
 
-// splitKey splits a "repo|date" key. repo is "owner/repo" (never contains "|").
-func splitKey(key string) (repo, date string, ok bool) {
+// splitKey splits a "repo|suffix" key, where suffix is a date, a path, or a
+// referrer name. repo is "owner/repo" and never contains "|", so cutting at the
+// first separator is correct even when the suffix contains one.
+func splitKey(key string) (repo, suffix string, ok bool) {
 	return strings.Cut(key, "|")
 }

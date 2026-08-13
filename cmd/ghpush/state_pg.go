@@ -43,12 +43,16 @@ func (s *pgStore) migrate() error {
 			clones integer NOT NULL DEFAULT 0,
 			PRIMARY KEY (repo, date)
 		);
-		CREATE TABLE IF NOT EXISTS ghpush.snapshots (
-			repo           text NOT NULL,
-			kind           text NOT NULL,
-			collected_date text NOT NULL,
-			PRIMARY KEY (repo, kind, collected_date)
+		CREATE TABLE IF NOT EXISTS ghpush.snapshot_counts (
+			repo  text    NOT NULL,
+			kind  text    NOT NULL,
+			item  text    NOT NULL,
+			count integer NOT NULL DEFAULT 0,
+			PRIMARY KEY (repo, kind, item)
 		);
+		-- Legacy per-day "already sent" flags, replaced by snapshot_counts.
+		-- Their date-keyed rows carry no count, so there is nothing to migrate.
+		DROP TABLE IF EXISTS ghpush.snapshots;
 	`)
 	if err != nil {
 		return fmt.Errorf("migrate: %w", err)
@@ -78,22 +82,23 @@ func (s *pgStore) load() (pushState, error) { //nolint:dupl // mirrors sqliteSto
 		return st, err
 	}
 
-	rows2, err := s.db.Query(`SELECT repo, kind, collected_date FROM ghpush.snapshots`)
+	rows2, err := s.db.Query(`SELECT repo, kind, item, count FROM ghpush.snapshot_counts`)
 	if err != nil {
-		return st, fmt.Errorf("query snapshots: %w", err)
+		return st, fmt.Errorf("query snapshot counts: %w", err)
 	}
 	defer rows2.Close()
 	for rows2.Next() {
-		var repo, kind, date string
-		if err := rows2.Scan(&repo, &kind, &date); err != nil {
+		var repo, kind, item string
+		var count int
+		if err := rows2.Scan(&repo, &kind, &item, &count); err != nil {
 			return st, err
 		}
-		key := repo + "|" + date
+		key := repo + "|" + item
 		switch kind {
 		case "referrer":
-			st.Referrers[key] = true
+			st.Referrers[key] = count
 		case "path":
-			st.Paths[key] = true
+			st.Paths[key] = count
 		}
 	}
 	return st, rows2.Err()
@@ -122,31 +127,19 @@ func (s *pgStore) save(st pushState) error {
 		}
 	}
 
-	for key := range st.Referrers {
-		repo, date, ok := splitKey(key)
-		if !ok {
-			continue
-		}
-		if _, err := tx.Exec(
-			`INSERT INTO ghpush.snapshots (repo, kind, collected_date) VALUES ($1, 'referrer', $2)
-			 ON CONFLICT (repo, kind, collected_date) DO NOTHING`,
-			repo, date,
-		); err != nil {
-			return fmt.Errorf("insert referrer snapshot %s: %w", key, err)
-		}
-	}
-
-	for key := range st.Paths {
-		repo, date, ok := splitKey(key)
-		if !ok {
-			continue
-		}
-		if _, err := tx.Exec(
-			`INSERT INTO ghpush.snapshots (repo, kind, collected_date) VALUES ($1, 'path', $2)
-			 ON CONFLICT (repo, kind, collected_date) DO NOTHING`,
-			repo, date,
-		); err != nil {
-			return fmt.Errorf("insert path snapshot %s: %w", key, err)
+	for _, s := range snapshotKinds(st) {
+		for key, count := range s.counts {
+			repo, item, ok := splitKey(key)
+			if !ok {
+				continue
+			}
+			_, err := tx.Exec(`
+				INSERT INTO ghpush.snapshot_counts (repo, kind, item, count) VALUES ($1, $2, $3, $4)
+				ON CONFLICT (repo, kind, item) DO UPDATE SET count = excluded.count
+			`, repo, s.kind, item, count)
+			if err != nil {
+				return fmt.Errorf("upsert %s snapshot %s: %w", s.kind, key, err)
+			}
 		}
 	}
 
@@ -162,8 +155,8 @@ func (s *pgStore) reset() error {
 	if _, err := tx.Exec(`DELETE FROM ghpush.traffic`); err != nil {
 		return fmt.Errorf("clear traffic: %w", err)
 	}
-	if _, err := tx.Exec(`DELETE FROM ghpush.snapshots`); err != nil {
-		return fmt.Errorf("clear snapshots: %w", err)
+	if _, err := tx.Exec(`DELETE FROM ghpush.snapshot_counts`); err != nil {
+		return fmt.Errorf("clear snapshot counts: %w", err)
 	}
 	return tx.Commit()
 }
