@@ -3,7 +3,7 @@ module github.com/matthewjhunter/ghtraffic
 go 1.25.12
 
 require (
-	github.com/jackc/pgx/v5 v5.10.0
+	github.com/jackc/pgx/v5 v5.11.0
 	modernc.org/sqlite v1.58.0
 )
 
