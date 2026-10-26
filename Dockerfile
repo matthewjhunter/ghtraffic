@@ -11,8 +11,10 @@ RUN go build -ldflags="-s -w" -o /out/ghtraffic . \
  && go build -ldflags="-s -w" -o /out/ghpush ./cmd/ghpush \
  && go build -ldflags="-s -w" -o /out/scheduler ./cmd/scheduler
 
-# Minimal runtime: no shell, no package manager, non-root by default.
-FROM gcr.io/distroless/static:nonroot
+# Minimal runtime: no shell, no package manager, non-root by default. The
+# Debian suite is pinned in the tag; the floating "static" tag trails a
+# release behind, trust store included.
+FROM gcr.io/distroless/static-debian13:nonroot
 COPY --from=build /out/ghtraffic /out/ghpush /out/scheduler /
 VOLUME ["/data"]
 USER nonroot:nonroot

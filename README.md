@@ -71,8 +71,8 @@ ghpush -pushed ~/.local/share/ghtraffic/pushed.db \
 For a long-running deployment, the `scheduler` binary runs one collect+push cycle
 on start and then every `INTERVAL_SECONDS`, execing `ghtraffic` (appending to the
 data file) then `ghpush`. It is the entrypoint of the published image
-`ghcr.io/matthewjhunter/ghtraffic`, built `FROM gcr.io/distroless/static` (no shell,
-runs as non-root). Posting to Umami over an internal network address avoids any
+`ghcr.io/matthewjhunter/ghtraffic`, built `FROM gcr.io/distroless/static-debian13:nonroot`
+(no shell, runs as uid 65532). Posting to Umami over an internal network address avoids any
 reverse-proxy IP filtering that would otherwise drop server-originated events.
 
 | Variable | Default | Description |
